@@ -66,8 +66,15 @@ Every change must be verified, not assumed.
   address 0. Corruption that "should crash" usually means this; use the ASan build and
   `llvm-symbolizer --obj=<file>.wasm <address>`.
 - Pointers are 32-bit (`uptr` is 32 bits): no tagging or packing that assumes 64-bit pointers.
-- There is no `mmap` aliasing, page protection or fault handling: no fastmem, no recompilers,
-  no code generation at runtime. Memory "mappings" are heap allocations.
+- There is no `mmap` aliasing, page protection or fault handling: no fastmem, and PCSX2's x86/arm64
+  recompilers and `common/emitter` (native code) cannot run. Memory "mappings" are heap allocations,
+  and code changes must be detected in software (content compares), not by write protection.
+- Generating WebAssembly at run time is possible (`docs/web-port/VU1-JIT-DESIGN.md`,
+  `tools/wasm/wasm-jit-spike/`): build a module in memory, compile and instantiate it with
+  `new WebAssembly.Module`/`Instance` on the thread that will run it, and call it through that thread's
+  function table. Each pthread has its own instance and table: compile, call and release on the same
+  thread. Generated code must match the interpreter it replaces bit for bit and is tested against it
+  (fuzzing in both engine tiers, and lockstep); never use relaxed SIMD in it.
 - Floats always round to nearest with denormals kept; the FP control register is emulated in
   software and has no effect.
 - SSE intrinsics are emulated on SIMD128 by Emscripten; some lower to slow scalar code.

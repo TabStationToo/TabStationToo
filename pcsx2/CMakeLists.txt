@@ -1081,9 +1081,24 @@ set(pcsx2arm64Headers
 	arm64/AsmHelpers.h
 )
 
-# WebAssembly (no recompilers)
+# WebAssembly (no native recompilers; the VU1 JIT generates WebAssembly, docs/web-port/VU1-JIT-DESIGN.md)
 set(pcsx2wasmSources
 	wasm/RecStubs.cpp
+	wasm/VU1Jit.cpp
+	wasm/VU1JitAnalysis.cpp
+	wasm/VU1JitFuzz.cpp
+	wasm/VU1JitHooks.cpp
+	wasm/VU1JitLockstep.cpp
+	)
+
+set(pcsx2wasmHeaders
+	wasm/VU1Jit.h
+	wasm/VU1JitAnalysis.h
+	wasm/VU1JitFuzz.h
+	wasm/VU1JitHooks.h
+	wasm/VU1JitLockstep.h
+	wasm/WasmEmitter.h
+	wasm/WasmJitRuntime.h
 	)
 
 # These ones benefit a lot from LTO
@@ -1105,7 +1120,13 @@ elseif(ARCH_ARM64)
 	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers})
 	target_link_libraries(PCSX2_FLAGS INTERFACE vixl)
 elseif(ARCH_WASM)
-	list(APPEND pcsx2LTOSources ${pcsx2wasmSources})
+	list(APPEND pcsx2LTOSources ${pcsx2wasmSources} ${pcsx2wasmHeaders})
+	# Generated modules go into the function table at run time (addFunction), and the JIT's JS side is a library
+	# (pcsx2/wasm/WasmJitRuntime.js). Every executable that links the core needs both.
+	target_link_options(PCSX2_FLAGS INTERFACE
+		"-sALLOW_TABLE_GROWTH=1"
+		"--js-library=${CMAKE_CURRENT_SOURCE_DIR}/wasm/WasmJitRuntime.js"
+	)
 endif()
 
 if(LTO_PCSX2_CORE)

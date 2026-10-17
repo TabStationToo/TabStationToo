@@ -6,6 +6,9 @@
 #include "MTVU.h"
 #include "VMManager.h"
 #include "Vif_Dynarec.h"
+#ifdef ARCH_WASM
+#include "wasm/VU1JitHooks.h"
+#endif
 
 #include <thread>
 
@@ -150,6 +153,12 @@ void VU_Thread::ExecuteRingBuffer()
 					if (addr != -1)
 						VU1.VI[REG_TPC].UL = addr & 0x7FF;
 					CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
+#ifdef ARCH_WASM
+					// The VU1 JIT's per-vsync statistics time and count it (pcsx2/wasm/VU1JitHooks.h).
+					if (VU1JitHooks::execute) [[unlikely]]
+						VU1JitHooks::execute(vu1RunCycles);
+					else
+#endif
 					CpuVU1->Execute(vu1RunCycles);
 					gifUnit.gifPath[GIF_PATH_1].FinishGSPacketMTVU();
 					semaXGkick.Post(); // Tell MTGS a path1 packet is complete
@@ -350,6 +359,12 @@ u32 VU_Thread::Get_vuCycles()
 
 void VU_Thread::Get_MTVUChanges()
 {
+#ifdef ARCH_WASM
+	// Deterministic mode of the headless runner (-mtvu-sync, pcsx2/wasm/VU1JitHooks.h): the EE sees each program's
+	// events at the same point of its own execution, so whole runs repeat exactly.
+	if (VU1JitHooks::mtvu_sync) [[unlikely]]
+		WaitVU();
+#endif
 	// Note: Atomic communication is with Gif_Unit.cpp Gif_HandlerAD_MTVU
 	u32 interrupts = mtvuInterrupts.load(std::memory_order_relaxed);
 	if (!interrupts)

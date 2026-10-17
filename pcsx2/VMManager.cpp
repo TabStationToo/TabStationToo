@@ -43,6 +43,9 @@
 #include "Vif_Dynarec.h"
 #include "VMManager.h"
 #include "ps2/BiosTools.h"
+#ifdef ARCH_WASM
+#include "wasm/VU1Jit.h"
+#endif
 
 #include "common/Console.h"
 #include "common/Error.h"
@@ -2760,7 +2763,16 @@ void VMManager::UpdateCPUImplementations()
 	psxCpu = &psxInt;
 
 	CpuVU0 = &CpuIntVU0;
+#ifdef ARCH_WASM
+	// The VU1 WebAssembly JIT runs on the MTVU thread (pcsx2/wasm/VU1Jit.h). Let that thread finish first, so the
+	// pointer never changes under a running program.
+	if (vu1Thread.IsOpen())
+		vu1Thread.WaitVU();
+	CpuVU1 = (THREAD_VU1 && EmuConfig.Cpu.Recompiler.EnableVU1) ? static_cast<BaseVUmicroCPU*>(&CpuWasmVU1) :
+																	static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#else
 	CpuVU1 = &CpuIntVU1;
+#endif
 #endif
 }
 

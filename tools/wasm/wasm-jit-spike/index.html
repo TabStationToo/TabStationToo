@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team -->
+<!-- SPDX-License-Identifier: GPL-3.0+ -->
+<html lang="en">
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>Wasm JIT spike</title>
+<style>
+	body { margin: 16px; background: #fff; color: #111; font: 13px/1.4 monospace; }
+	pre { white-space: pre-wrap; }
+</style>
+<pre id="out"></pre>
+<script>
+// index.html?tests=basic,latency,...&args=key=value;key=value
+// Prints the spike's output on the page and to the console (DONE / FAIL at the end).
+// (Emscripten's script defines globals such as `out`: keep this page's names distinct.)
+const pageQuery = new URLSearchParams(location.search);
+const pageOut = document.getElementById("out");
+function line(text) {
+	console.log(text);
+	pageOut.textContent += text + "\n";
+}
+var Module = {
+	arguments: [pageQuery.get("tests") || "all", ...(pageQuery.get("args") ? pageQuery.get("args").split(";") : [])],
+	print: line,
+	printErr: (text) => { console.warn(text); pageOut.textContent += text + "\n"; },
+};
+if (!crossOriginIsolated) line("FAIL the page is not cross-origin isolated (serve it with tools/wasm/serve.py)");
+const pageScript = document.createElement("script");
+pageScript.src = "spike-web.js";
+document.body.append(pageScript);
+</script>
+</html>

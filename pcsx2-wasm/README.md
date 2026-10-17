@@ -162,6 +162,23 @@ encoding, but `#`, `?`, `&`, `+` and `%` need both.
 reports the disc (name, size, source, whether it is open), the disc reader's state and read counts,
 the game's title and serial as PCSX2 reported them, and the memory card's last save.
 
+VU1 JIT testing (`docs/web-port/VU1-JIT-DESIGN.md`; the JIT is off by default and this is not a user
+setting):
+
+- `?vu1jit=1` boots with the VU1 JIT (`EmuCore/CPU/Recompiler/EnableVU1`). Its counters (self-test,
+  programs compiled, instructions, of them on the interpreter) go to the browser console every 10 s.
+- `?vu1jit=fuzz:SEED:COUNT[:timing|jit|both]` runs the JIT's fuzzer on a worker, without a BIOS or
+  a VM (boots are refused while it runs), and logs its summary: `timing` checks the timing model at
+  every instruction of COUNT random programs, `jit` runs each one on the interpreter and on the JIT
+  and compares them, `both` does both.
+- `window.PCSX2Web.vu1jit()` returns the mode, the counters and the fuzzer's status.
+
+The headless runner has the same switches and more: `-set EmuCore/CPU/Recompiler/EnableVU1=true`,
+`-vu1jit-fuzz SEED:COUNT[:MODE]`, `-vu1jit-oracle` (the timing model checked at every VU1
+instruction of a real run), `-vu1jit-lockstep` (every VU1 program run on the JIT and on the
+interpreter and compared), `-vu1jit-stats FILE` (per-vsync VU1 statistics as CSV) and `-mtvu-sync`
+(the EE waits for the VU thread at each check, so whole runs repeat exactly).
+
 ## UI assets
 
 The page self-hosts everything it loads (it is cross-origin isolated and makes no requests to

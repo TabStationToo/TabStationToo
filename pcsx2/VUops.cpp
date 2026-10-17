@@ -6,6 +6,9 @@
 #include "GS.h"
 #include "Gif_Unit.h"
 #include "MTVU.h"
+#ifdef ARCH_WASM
+#include "wasm/VU1JitHooks.h"
+#endif
 
 #include <cmath>
 u32 laststall = 0;
@@ -1874,6 +1877,12 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 		// ExecuteGSPacketMTVU, which cannot resume an A+D tag split between calls.
 		if (THREAD_VU1_INTERP)
 		{
+#ifdef ARCH_WASM
+			// The VU1 JIT's lockstep mode and fuzzer record PATH1 here (pcsx2/wasm/VU1JitHooks.h).
+			if (VU1JitHooks::path1) [[unlikely]]
+				VU1JitHooks::path1(&VU1.Mem[VU1.xgkickaddr], transfersize * 0x10, (transfersize * 0x10) >= VU1.xgkicksizeremaining);
+			else
+#endif
 			if ((transfersize * 0x10) < VU1.xgkicksizeremaining)
 				gifUnit.gifPath[GIF_PATH_1].CopyGSPacketData(&VU1.Mem[VU1.xgkickaddr], transfersize * 0x10, true);
 			else

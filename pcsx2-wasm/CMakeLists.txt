@@ -41,7 +41,8 @@ foreach(res IN LISTS PCSX2_WASM_RESOURCES)
 	list(APPEND PCSX2_WASM_PRELOAD_OPTIONS "--preload-file=${src_escaped}@/resources/${res}")
 	list(APPEND PCSX2_WASM_PRELOAD_FILES "${src}")
 endforeach()
-set_property(TARGET pcsx2-wasm APPEND PROPERTY LINK_DEPENDS ${PCSX2_WASM_PRELOAD_FILES})
+set_property(TARGET pcsx2-wasm APPEND PROPERTY LINK_DEPENDS ${PCSX2_WASM_PRELOAD_FILES}
+	"${CMAKE_SOURCE_DIR}/pcsx2/wasm/WasmJitRuntime.js")
 
 set(PCSX2_WASM_EXPORTS
 	_main
@@ -59,6 +60,13 @@ list(APPEND PCSX2_WASM_EXPORTS
 	_pcsx2web_boot_disc
 	_pcsx2web_disc_block
 	_pcsx2web_game
+)
+# VU1 JIT testing (the page's ?vu1jit= parameter).
+list(APPEND PCSX2_WASM_EXPORTS
+	_pcsx2web_vu1jit_enable
+	_pcsx2web_vu1jit_fuzz
+	_pcsx2web_vu1jit_fuzz_status
+	_pcsx2web_vu1jit_stats
 )
 list(JOIN PCSX2_WASM_EXPORTS "," PCSX2_WASM_EXPORTS)
 
