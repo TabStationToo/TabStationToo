@@ -111,7 +111,7 @@
 
 	const COPY = {
 		intakeTitle: 'Start with your BIOS.',
-		intakeBody: 'TabStationToo needs the BIOS from a PS2 you own, usually a 4\u00a0MB .bin file. For now it runs the console’s own menus; games come later.',
+		intakeBody: 'TabStationToo needs the BIOS from a PS2 you own, usually a 4\u00a0MB .bin file. Then add a disc image of one of your games, or boot the console’s own menus.',
 		choose: 'Choose BIOS file…',
 		dropHere: 'or drop it here',
 		staysHere: 'It stays in this browser. Nothing is uploaded.',
@@ -123,7 +123,7 @@
 		drop: 'Drop to use this BIOS.',
 		dropBlocked: 'Stop the PS2 first to change the BIOS.',
 		tooSmall: (size) => `That file is too small to be a PS2 BIOS (${size}; a BIOS is usually 4\u00a0MB).`,
-		tooBig: (size) => `That file is ${size}. A BIOS is 4 to 8\u00a0MB, and game discs aren’t supported yet.`,
+		tooBig: (size) => `That file is ${size}. A BIOS is 4 to 8\u00a0MB.`,
 		unreadable: 'Couldn’t read that file. Try choosing it again.',
 		fetchFailed: (path, why) => `Couldn’t fetch the BIOS from ${path} (${why}).`,
 		otherOrigin: '?bios= only accepts addresses on this server.',
@@ -303,6 +303,7 @@
 		wasmLoaded: false,
 		outcome: null, // null | 'stopped' | 'failed': what the slate shows after a run
 		error: '', // the slate's coral line; stays until the next attempt
+		errorIsDisc: false, // page.error is about the disc: a BIOS arriving does not clear it
 		fatal: null, // { kind, what, detail, line }
 		env: null, // environmentProblem() when unsupported
 		drag: '', // '' | 'ok' | 'blocked'
@@ -504,8 +505,9 @@
 
 	// The slate's coral line, which stays until the next attempt. The slate is not a live region,
 	// so the line is announced too.
-	function showError(text) {
+	function showError(text, isDisc = false) {
 		page.error = text;
+		page.errorIsDisc = isDisc;
 		announce(text);
 	}
 
@@ -752,6 +754,7 @@
 			page.pendingBiosBytes = null;
 		}
 		renderProgress();
+		audioStart(); // the context exists already when a boot was queued while the runtime loaded
 		frame.lastPollTime = performance.now();
 		pollTimer = setInterval(poll, POLL_MS);
 		rafId = requestAnimationFrame(drawLoop);
@@ -780,6 +783,9 @@
 			onRuntimeInitialized,
 			onAbort: (what) => fatal('crash', 'The emulator aborted', what),
 			onExit,
+			preRun: [mountMemoryCards],
+			postRun: [onRuntimeReadyForDiscs],
+			arguments: audioModuleArguments(),
 		};
 
 		const script = document.createElement('script');
@@ -982,7 +988,7 @@
 	}
 
 	function canBoot() {
-		return page.phase === 'ready' && !!page.bios && !!page.writtenBiosName && !page.biosReading &&
+		return page.phase === 'ready' && !!page.bios && !!page.writtenBiosName && !page.biosReading && discBootable() &&
 			(page.vmState === STATE.WAITING || page.vmState === STATE.STOPPED || page.vmState === STATE.FAILED);
 	}
 
@@ -993,6 +999,7 @@
 	// The Boot button and Enter on the screen. While the runtime is still loading this queues the
 	// boot, and pressing again cancels it.
 	function boot() {
+		audioUnlock(); // inside the gesture: the browser lets sound start
 		page.error = '';
 		// Queued (the runtime is still loading, or the ?bios= file is still on its way): pressing
 		// again cancels the boot, and pressing once more queues it again.
@@ -1010,13 +1017,19 @@
 		startVm();
 	}
 
-	function startVm() {
+	// checked: the disc was just read (checkDiscThenBoot), or there is none.
+	function startVm(checked = false) {
 		if (!canBoot())
 			return;
+		audioUnlock(); // a boot without a gesture (?bios=) makes the context too; it waits for a key or click
+		if (!checked && discNeedsCheck()) {
+			checkDiscThenBoot();
+			return;
+		}
 		releaseAllKeys(true);
 		let result;
 		try {
-			result = api.boot(page.bios.name);
+			result = bootRequest();
 		} catch (err) {
 			fatal('crash', 'Calling pcsx2web_boot failed', err);
 			return;
@@ -1060,6 +1073,7 @@
 		if (!canStop())
 			return;
 		releaseAllKeys(true);
+		audioFadeOut(); // before the PS2 stops and its sound ends
 		try {
 			api.stop();
 		} catch (err) {
@@ -1105,6 +1119,21 @@
 
 	function sizeParts(bytes) {
 		const [num, unit] = formatSize(bytes).split('\u00a0');
+		return [{ num, unit }];
+	}
+
+	// Discs in decimal units, as file managers and disc sizes usually give them (3,199,631,360 bytes is
+	// 3.2 GB); BIOS dumps stay binary (4 MB).
+	function formatDiscSize(bytes) {
+		if (bytes >= 1e9)
+			return `${(bytes / 1e9).toFixed(1)}\u00a0GB`;
+		if (bytes >= 1e6)
+			return `${(bytes / 1e6).toFixed(bytes >= 1e8 ? 0 : 1)}\u00a0MB`;
+		return `${Math.max(1, Math.round(bytes / 1e3))}\u00a0KB`;
+	}
+
+	function discSizeParts(bytes) {
+		const [num, unit] = formatDiscSize(bytes).split('\u00a0');
 		return [{ num, unit }];
 	}
 
@@ -1192,7 +1221,10 @@
 	function setBios(name, bytes, origin, remembered) {
 		page.bios = { name, size: bytes.length, origin, remembered, saveFailed: false };
 		page.outcome = null;
-		page.error = '';
+		// A disc error stays: with ?bios= and ?disc= the BIOS often arrives after the disc failed, and the
+		// error is then the only sign of why the queued boot did not run.
+		if (!page.errorIsDisc)
+			page.error = '';
 		if (page.phase === 'ready') {
 			writeBiosToFs(name, bytes);
 			page.pendingBiosBytes = null;
@@ -1428,6 +1460,1873 @@
 			focusPrimary();
 	}
 
+	// ------------------------------------------------------------------ discs (UI-SPEC.md §10)
+	// The disc worker (disc-worker.js) reads the user's file, or a URL, for the emulator's disc reader
+	// (docs/web-port/DISC-DESIGN.md): nothing is copied first. Once the worker has opened the disc, a
+	// 0-byte placeholder at /disc/<name> stands for it, and pcsx2web_boot_disc() boots that path.
+
+	const DISC_DIR = '/disc';
+	const DISC_WORKER_FILE = 'disc-worker.js';
+	const DISC_IDB_NAME = 'pcsx2-web-disc';
+	const DISC_IDB_STORE = 'disc';
+	const DISC_IDB_KEY = 'last';
+	// The layouts InputIsoFile::Detect() tries, as [sector size, data offset, block offset]: the ISO 9660
+	// primary volume descriptor ("CD001") is in sector 16, and PCSX2 wants at least 17 sectors.
+	const DISC_LAYOUTS = [[2048, 0, 24], [2336, 0, 16], [2352, 0, 0], [2448, 0, 0],
+		[2048, 150 * 2048, 24], [2352, 150 * 2048, 0], [2448, 150 * 2048, 0]];
+	const DISC_HEADER_BYTES = 150 * 2048 + 17 * 2448;
+	const DISC_MIN_SIZE = 17 * 2048;
+	const DISC_UNSUPPORTED_RE = /\.(chd|cso|zso|gz|dump)$/i;
+	const DISC_BOOT_FULL = 1; // pcsx2web_boot_disc(): the BIOS intro instead of fast boot
+	const DISC_POLL_MS = 500;
+	const DISC_ERROR_MS = 8000;
+	const DISC_WORKER_RESTARTS = 3;
+	// Without Web Locks the page cannot know when a terminated worker is gone; it waits this long. That is
+	// safe for the sources it sends (a File or a URL: their bytes reach the memory only through the
+	// worker's JS, which terminate() stops at once), not for OPFS sync access handles, which it never sends.
+	const DISC_WORKER_GONE_MS = 1000;
+	const DISC_WORKER_LOCK = 'tabstationtoo-disc-worker-';
+	// Request block words (DISC-DESIGN.md 4.1), for failing what a dead worker left waiting.
+	const DB_SLOTS = 2;
+	const DB_SLOT_BYTES = 3;
+	const DB_STATE = 4;
+	const DB_DOORBELL = 5;
+	const DB_HEADER_WORDS = 16;
+	const DB_STATE_STOPPED = 3;
+	const DB_STATE_READY = 2;
+	const DB_GENERATION = 6;
+	const DB_SIZE_LO = 7;
+	const DB_SIZE_HI = 8;
+	const DS_PENDING = 2;
+	const DS_BUSY = 3;
+	const DS_DONE = 4;
+	const DS_RESULT = 1;
+	const DE_CANCELLED = -5;
+	// pcsx2web_game(): seq, disc CRC, ELF CRC, serial[32], title[256].
+	const GAME_SERIAL_AT = 12;
+	const GAME_SERIAL_BYTES = 32;
+	const GAME_TITLE_BYTES = 256;
+
+	const DISC_COPY = {
+		choose: 'Choose a disc…',
+		another: 'Use another disc…',
+		remove: 'Remove the disc',
+		where: { file: 'Read from your file', handle: 'Remembered in this browser', url: 'Loaded from ?disc=, not saved' },
+		withBios: (bios) => `With ${bios}.`,
+		savesKept: 'Saves go to a memory card kept in this browser.',
+		savesVisit: 'Saves last for this visit only.',
+		savesOtherTab: 'Saves last for this visit only: TabStationToo is open in another tab.',
+		lastDisc: 'Last disc: ',
+		openAgain: 'Open it again',
+		waiting: ' is chosen. Add a BIOS to boot it.',
+		blocked: 'Stop the PS2 first to change the disc.',
+		blockedAny: 'Stop the PS2 first to change the disc or BIOS.',
+		drop: 'Drop to use this disc or BIOS.',
+		notDisc: 'That file isn’t a disc image TabStationToo can read. Use an .iso, .bin or .img of a PS2 disc.',
+		compressed: 'Compressed images (.chd, .cso, .zso, .gz) and block dumps aren’t supported yet. Use an .iso.',
+		unreadable: 'Couldn’t read the disc file. It may have been moved, changed or deleted; choose it again.',
+		denied: (name) => `The browser didn’t allow reading ${name}. Choose it again.`,
+		fetchFailed: (path, why) => `Couldn’t open the disc at ${path} (${why}).`,
+		otherOrigin: '?disc= only accepts addresses on this server.',
+		lost: 'The disc can’t be read any more. Stop, then choose the file again.',
+		lostServer: 'The disc server stopped answering, so the game can’t read its disc.',
+		lostUrl: 'The game can’t read its disc from the server any more.',
+		readable: 'The disc can be read again. If the game doesn’t go on, stop it and boot again.',
+		readerFailed: 'The disc reader stopped working. Reload the page to read discs again.',
+		removed: 'Disc removed. Boot opens the console’s menus.',
+		memcardFailed: 'Couldn’t keep the memory card in this browser. Saves last for this visit.',
+		announceReady: 'Disc ready.',
+		announceRemoved: 'Disc removed.',
+	};
+
+	const discEls = {
+		slateDisc: $('slate-disc'),
+		slateRemove: $('slate-remove'),
+		input: $('disc-input'),
+		btn: $('disc-btn'),
+		btnName: $('disc-btn-name'),
+		menu: $('disc-menu'),
+		menuName: $('disc-menu-name'),
+		menuWhere: $('disc-menu-where'),
+		menuChoose: $('disc-menu-choose'),
+		menuRemove: $('disc-menu-remove'),
+		menuReason: $('disc-menu-reason'),
+	};
+
+	const disc = {
+		worker: null,
+		workerLock: '', // the Web Lock the worker holds while it lives ('' if it cannot hold one)
+		attached: false,
+		dead: false, // no disc reader in this page (missing exports, or it kept failing)
+		restarting: false, // a worker died; the next one is not attached yet
+		restarts: 0,
+		checking: false, // the disc is being read before a boot (checkDiscThenBoot)
+		block: 0, // address of the request block (pcsx2web_disc_block)
+		gamePtr: 0, // address of the game details (pcsx2web_game)
+		status: null, // the worker's last status
+		calls: new Map(), // reply id -> resolve
+		nextCall: 1,
+		// The chosen disc: { name, path, size, kind: 'file'|'handle'|'url', file, url, handle, title,
+		// opened, remembered }. A newer choice replaces it only once the worker has opened the new one.
+		current: null,
+		opening: null, // a disc the worker is opening (or will open once attached)
+		op: 0, // generation token: a newer choice or Remove wins over an older, slower one
+		urlPending: false, // ?disc= is still being checked: a queued boot waits for it
+		remembered: null, // the last picked disc's handle (Chromium): { handle, name, size, lastModified, title }
+		runIsDisc: false, // the current or last boot booted a disc
+		runTitle: '', // the game's title as PCSX2 reported it during that boot
+		runSerial: '',
+		runGeneration: 0, // the request block's generation the current or last disc boot read
+		gameSeq: 0,
+		errorShown: false,
+		lastVm: STATE.WAITING,
+		timer: 0,
+	};
+
+	function discBootable() {
+		return !disc.urlPending && !disc.opening && !disc.checking && !disc.restarting && (!disc.current || disc.current.opened);
+	}
+
+	// The game's title for a file name: no extension, no trailing region or language tags.
+	function discTitleFromName(name) {
+		let t = String(name).replace(/\.[a-z0-9]{1,4}$/i, '');
+		let prev;
+		do {
+			prev = t;
+			t = t.replace(/\s*(\([^()]*\)|\[[^[\]]*\])\s*$/, '');
+		} while (t !== prev);
+		return t.replace(/_+/g, ' ').trim() || String(name);
+	}
+
+	function discDisplayTitle(d) {
+		return d.title || discTitleFromName(d.name);
+	}
+
+	function discWhere(d) {
+		if (d.kind === 'url')
+			return DISC_COPY.where.url;
+		return d.remembered ? DISC_COPY.where.handle : DISC_COPY.where.file;
+	}
+
+	// A plain file name for /disc, short enough for pcsx2web_boot_disc's 512-byte path.
+	function sanitizeDiscName(name) {
+		let n = String(name || '').replace(/[/\\\x00-\x1f\x7f]/g, '_').trim();
+		while (utf8.encode(n).length > 400)
+			n = Array.from(n).slice(1).join('');
+		if (!n || n === '.' || n === '..')
+			n = 'disc.iso';
+		return n;
+	}
+
+	// The layout PCSX2 will detect in a disc image's first bytes, or null.
+	function discLayout(bytes) {
+		for (const [size, offset, blockofs] of DISC_LAYOUTS) {
+			const at = offset + 16 * size + 25 - blockofs;
+			if (at + 5 <= bytes.length && bytes[at] === 0x43 && bytes[at + 1] === 0x44 && bytes[at + 2] === 0x30 &&
+				bytes[at + 3] === 0x30 && bytes[at + 4] === 0x31)
+				return size;
+		}
+		return null;
+	}
+
+	async function isDiscImage(file) {
+		if (file.size < DISC_MIN_SIZE)
+			return false;
+		const bytes = new Uint8Array(await file.slice(0, Math.min(file.size, DISC_HEADER_BYTES)).arrayBuffer());
+		return discLayout(bytes) !== null;
+	}
+
+	function discError(text) {
+		showError(text, true);
+		pageLog(text, 'warn');
+		render();
+	}
+
+	// Any file from a drop or the BIOS picker: a disc image goes to the disc, anything else to the BIOS.
+	async function acceptFile(file, handlePromise) {
+		if (!file)
+			return;
+		if (!canChangeBios()) {
+			subtitle(DISC_COPY.blockedAny);
+			return;
+		}
+		if (DISC_UNSUPPORTED_RE.test(file.name)) {
+			discError(DISC_COPY.compressed);
+			return;
+		}
+		let isDisc;
+		try {
+			isDisc = await isDiscImage(file);
+		} catch (err) {
+			pageLog(`Could not read ${file.name}: ${errorText(err)}`, 'warn');
+			discError(COPY.unreadable);
+			return;
+		}
+		if (isDisc) {
+			chooseDisc({ kind: 'file', file, name: file.name, size: file.size }, await (handlePromise || null));
+		} else if (file.size > BIOS_REJECT_ABOVE) {
+			discError(DISC_COPY.notDisc);
+		} else {
+			acceptBiosFile(file);
+		}
+	}
+
+	// A file from the disc picker (or reopened from its handle).
+	async function acceptDiscFile(file, handle) {
+		if (!file)
+			return;
+		if (!canChangeBios()) {
+			subtitle(DISC_COPY.blocked);
+			return;
+		}
+		if (DISC_UNSUPPORTED_RE.test(file.name)) {
+			discError(DISC_COPY.compressed);
+			return;
+		}
+		let ok;
+		try {
+			ok = await isDiscImage(file);
+		} catch (err) {
+			pageLog(`Could not read ${file.name}: ${errorText(err)}`, 'warn');
+			discError(DISC_COPY.unreadable);
+			return;
+		}
+		if (!ok) {
+			discError(DISC_COPY.notDisc);
+			return;
+		}
+		chooseDisc({ kind: 'file', file, name: file.name, size: file.size }, handle);
+	}
+
+	// Drops: the handle (Chromium) is asked for during the drop event, the only time it is available.
+	function acceptDrop(dt) {
+		const files = Array.from((dt && dt.files) || []);
+		if (!files.length)
+			return;
+		const items = Array.from((dt && dt.items) || []).filter((i) => i.kind === 'file');
+		const handles = items.map((i) => (typeof i.getAsFileSystemHandle === 'function'
+			? i.getAsFileSystemHandle().catch(() => null) : Promise.resolve(null)));
+		const file = files.find((f) => f.size > BIOS_REJECT_ABOVE) || pickBiosCandidate(files);
+		const handle = handles[files.indexOf(file)] || null;
+		acceptFile(file, handle && handle.then((h) => (h && h.kind === 'file' ? h : null)));
+	}
+
+	function chooseDisc(desc, handle) {
+		if (!canChangeBios()) {
+			subtitle(DISC_COPY.blocked);
+			return;
+		}
+		const op = ++disc.op;
+		const d = {
+			name: sanitizeDiscName(desc.name), path: '', size: desc.size, kind: handle ? 'handle' : desc.kind,
+			file: desc.file || null, url: desc.url || null, handle: handle || null, title: '', opened: false,
+			remembered: false, sourceName: desc.name,
+		};
+		d.path = `${DISC_DIR}/${d.name}`;
+		const r = disc.remembered;
+		if (r && r.name === desc.name && r.size === desc.size && r.title)
+			d.title = r.title;
+		page.error = '';
+		disc.opening = d;
+		pageLog(`Disc chosen: ${desc.name} (${desc.size.toLocaleString('en-US')} bytes${desc.url ? `, ${desc.url}` : ''}).`);
+		openDiscInWorker(d, op);
+		render();
+	}
+
+	function discFailureText(d, error) {
+		const message = (error && error.message) || '';
+		if (d.kind === 'url') {
+			const http = /HTTP (\d{3})/.exec(message);
+			const code = error && error.code;
+			const why = http ? `HTTP ${http[1]}` : /byte ranges/.test(message) ? 'no byte ranges'
+				: code === 'TIMEOUT' ? 'no answer in time' : code === 'IO' && /changed/.test(message) ? 'the disc changed' : 'network error';
+			return DISC_COPY.fetchFailed(displayPath(d.url), why);
+		}
+		if (/Permission/i.test(message))
+			return DISC_COPY.denied(d.sourceName || d.name);
+		return DISC_COPY.unreadable;
+	}
+
+	async function openDiscInWorker(d, op) {
+		if (!disc.attached)
+			return; // opened once the worker is attached
+		const msg = d.url ? { type: 'open', url: d.url, name: d.name } : { type: 'open', file: d.file, name: d.name };
+		const reply = await discCall(msg);
+		if (op !== disc.op || disc.opening !== d)
+			return; // a newer choice or Remove won
+		disc.opening = null;
+		if (!reply.ok) {
+			// The worker keeps serving the disc it had, so the previous choice stands.
+			pageLog(`Could not open the disc ${d.name}: ${reply.error ? reply.error.message : 'unknown error'}`, 'warn');
+			page.autoBoot = false;
+			discError(discFailureText(d, reply.error));
+			return;
+		}
+		const prev = disc.current;
+		d.size = (reply.status && reply.status.disc && reply.status.disc.size) || d.size;
+		try {
+			const FS = window.Module.FS;
+			if (!FS.analyzePath(DISC_DIR).exists)
+				FS.mkdir(DISC_DIR);
+			if (prev && prev.path !== d.path && FS.analyzePath(prev.path).exists)
+				FS.unlink(prev.path);
+			FS.writeFile(d.path, new Uint8Array(0));
+		} catch (err) {
+			pageLog(`Could not write the disc placeholder ${d.path}: ${errorText(err)}`, 'warn');
+			discError(DISC_COPY.unreadable);
+			return;
+		}
+		d.opened = true;
+		disc.current = d;
+		page.outcome = null;
+		if (d.handle)
+			rememberDisc(d);
+		else if (d.kind !== 'url')
+			forgetRememberedDisc(); // the last disc is this one now, and it cannot be reopened
+		pageLog(`Disc ready: ${d.path} (${formatDiscSize(d.size).replace(' ', ' ')}).`);
+		render();
+		if (vmLive())
+			return; // a restarted reader opened it again: the running game cannot use it (reviewRunningDisc)
+		announce(DISC_COPY.announceReady);
+		if (focusIsFree())
+			focusPrimary();
+		maybeAutoBoot();
+	}
+
+	function removeDisc() {
+		if (!canChangeBios()) {
+			subtitle(DISC_COPY.blocked);
+			return;
+		}
+		disc.op++;
+		const d = disc.current;
+		disc.current = null;
+		disc.opening = null;
+		disc.urlPending = false;
+		if (disc.attached)
+			discCall({ type: 'close' });
+		if (d && page.phase === 'ready') {
+			try {
+				window.Module.FS.unlink(d.path);
+			} catch {
+				// already gone
+			}
+		}
+		forgetRememberedDisc();
+		page.outcome = null;
+		page.error = '';
+		hideDiscMenu();
+		render();
+		subtitle(DISC_COPY.removed);
+		announce(DISC_COPY.announceRemoved);
+		focusPrimary();
+	}
+
+	async function openDiscPicker() {
+		if (!canChangeBios()) {
+			subtitle(DISC_COPY.blocked);
+			return;
+		}
+		hideDiscMenu();
+		if (typeof window.showOpenFilePicker !== 'function') {
+			discEls.input.click();
+			return;
+		}
+		let handle;
+		try {
+			[handle] = await window.showOpenFilePicker({
+				id: 'tabstationtoo-disc',
+				types: [{ description: 'PS2 disc images', accept: { 'application/octet-stream': ['.iso', '.bin', '.img'] } }],
+			});
+		} catch (err) {
+			if (err && err.name === 'AbortError')
+				return;
+			pageLog(`The file picker failed (${err && err.message}); using the plain one.`, 'warn');
+			discEls.input.click();
+			return;
+		}
+		let file;
+		try {
+			file = await handle.getFile();
+		} catch (err) {
+			pageLog(`Could not read the picked disc: ${errorText(err)}`, 'warn');
+			discError(DISC_COPY.unreadable);
+			return;
+		}
+		acceptDiscFile(file, handle);
+	}
+
+	// "Open it again": one press, the browser's permission prompt, then the disc. Never automatic.
+	async function reopenLastDisc() {
+		const rec = disc.remembered;
+		if (!rec)
+			return;
+		if (!canChangeBios()) {
+			subtitle(DISC_COPY.blocked);
+			return;
+		}
+		let permission = 'denied';
+		try {
+			permission = await rec.handle.queryPermission({ mode: 'read' });
+			if (permission !== 'granted')
+				permission = await rec.handle.requestPermission({ mode: 'read' });
+		} catch (err) {
+			pageLog(`Could not ask for permission to read ${rec.name}: ${errorText(err)}`, 'warn');
+		}
+		if (permission !== 'granted') {
+			discError(DISC_COPY.denied(rec.name));
+			return;
+		}
+		let file;
+		try {
+			file = await rec.handle.getFile();
+		} catch (err) {
+			pageLog(`Could not reopen ${rec.name}: ${errorText(err)}`, 'warn');
+			discError(DISC_COPY.unreadable);
+			return;
+		}
+		acceptDiscFile(file, rec.handle);
+	}
+
+	// A same-origin URL as the slate shows it: the path, decoded.
+	function displayPath(href) {
+		let path = href;
+		try {
+			path = new URL(href, location.href).pathname;
+			path = decodeURIComponent(path);
+		} catch {
+			// keep what there is
+		}
+		return path;
+	}
+
+	async function loadDiscFromUrl(param) {
+		let url;
+		try {
+			url = new URL(param, location.href);
+		} catch {
+			disc.urlPending = false;
+			page.autoBoot = false;
+			discError(DISC_COPY.fetchFailed(param, 'not a valid address'));
+			return;
+		}
+		if (url.origin !== location.origin) {
+			disc.urlPending = false;
+			page.autoBoot = false;
+			discError(DISC_COPY.otherOrigin);
+			return;
+		}
+		let base = url.pathname.split('/').pop() || '';
+		try {
+			base = decodeURIComponent(base);
+		} catch {
+			// keep it encoded
+		}
+		let bytes;
+		let size = 0;
+		try {
+			const res = await fetch(url.href, { headers: { Range: `bytes=0-${DISC_HEADER_BYTES - 1}` }, cache: 'no-store' });
+			if (res.status !== 206) {
+				if (res.body)
+					res.body.cancel().catch(() => {});
+				if (res.ok)
+					throw new Error('The server does not support byte ranges.');
+				throw httpError(res.status, res.statusText, url.pathname);
+			}
+			const range = /\/(\d+)$/.exec(res.headers.get('Content-Range') || '');
+			size = range ? Number(range[1]) : 0;
+			bytes = new Uint8Array(await res.arrayBuffer());
+		} catch (err) {
+			disc.urlPending = false;
+			page.autoBoot = false;
+			pageLog(`Could not fetch the disc from ${url.pathname}: ${errorText(err)}`, 'warn');
+			discError(DISC_COPY.fetchFailed(displayPath(url.href), err && err.httpStatus ? `HTTP ${err.httpStatus}`
+				: /byte ranges/.test(String(err && err.message)) ? 'no byte ranges' : 'network error'));
+			return;
+		}
+		disc.urlPending = false;
+		if (size < DISC_MIN_SIZE || discLayout(bytes) === null) {
+			page.autoBoot = false;
+			discError(DISC_COPY.notDisc);
+			return;
+		}
+		chooseDisc({ kind: 'url', url: url.href, name: base, size }, null);
+	}
+
+	// ---- the disc worker
+
+	function discCall(msg) {
+		return new Promise((resolve) => {
+			if (!disc.worker) {
+				resolve({ ok: false, error: { code: 'CANCELLED', message: 'The disc reader is not running.' } });
+				return;
+			}
+			const id = disc.nextCall++;
+			disc.calls.set(id, resolve);
+			disc.worker.postMessage({ ...msg, id });
+		});
+	}
+
+	// Module.postRun: after onRuntimeInitialized, so the exports are bound. The tick also keeps the memory
+	// card, so it runs even when the disc reader cannot.
+	function onRuntimeReadyForDiscs() {
+		if (page.phase !== 'ready' || !api)
+			return;
+		clearInterval(disc.timer);
+		disc.timer = setInterval(discTick, DISC_POLL_MS);
+		startDiscWorker(null);
+	}
+
+	function vmLive() {
+		return page.vmState === STATE.STARTING || page.vmState === STATE.RUNNING;
+	}
+
+	// No disc reader in this page any more: a chosen disc cannot be read, so it is dropped (Boot then
+	// opens the console's menus) and the slate says why.
+	function discReaderGone(why) {
+		disc.dead = true;
+		disc.restarting = false;
+		pageLog(why, 'error');
+		const had = disc.current || disc.opening;
+		disc.current = null;
+		disc.opening = null;
+		disc.urlPending = false;
+		if (had) {
+			page.autoBoot = false;
+			if (disc.runIsDisc && vmLive())
+				subtitle(DISC_COPY.readerFailed, DISC_ERROR_MS);
+			discError(DISC_COPY.readerFailed);
+		} else {
+			render();
+		}
+	}
+
+	// The request block's words, for the page's part in a worker restart.
+	function discBlockView() {
+		const buf = heapBuffer();
+		if (!buf || !disc.block)
+			return null;
+		const i32 = new Int32Array(buf);
+		const hdr = disc.block >> 2;
+		return { i32, hdr, slots: Atomics.load(i32, hdr + DB_SLOTS), slotWords: Atomics.load(i32, hdr + DB_SLOT_BYTES) >> 2 };
+	}
+
+	// What a new worker needs to take over the disc in the block: the same source, size and generation,
+	// so the emulator's open disc and the requests waiting in the block stay valid (DISC-DESIGN.md §5.6).
+	// Null when the block does not hold the current disc.
+	function discResumeFor(d) {
+		const v = discBlockView();
+		if (!v || !d || !d.opened)
+			return null;
+		if (Atomics.load(v.i32, v.hdr + DB_STATE) !== DB_STATE_READY)
+			return null;
+		const size = (Atomics.load(v.i32, v.hdr + DB_SIZE_LO) >>> 0) + (Atomics.load(v.i32, v.hdr + DB_SIZE_HI) >>> 0) * 2 ** 32;
+		if (size !== d.size)
+			return null;
+		const generation = Atomics.load(v.i32, v.hdr + DB_GENERATION) >>> 0;
+		return { ...(d.url ? { url: d.url } : { file: d.file }), name: d.name, generation, size };
+	}
+
+	function discLockName() {
+		if (!navigator.locks || typeof navigator.locks.request !== 'function')
+			return '';
+		const id = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+		return DISC_WORKER_LOCK + id;
+	}
+
+	// resume: from discResumeFor(), when this worker replaces one that died.
+	function startDiscWorker(resume) {
+		if (page.phase !== 'ready' || !api || disc.dead || disc.worker)
+			return;
+		const M = window.Module;
+		if (typeof M._pcsx2web_disc_block !== 'function' || typeof M._pcsx2web_boot_disc !== 'function' || !wasmMemory) {
+			discReaderGone('This build has no disc reader (pcsx2web_disc_block, pcsx2web_boot_disc or the wasm memory is missing).');
+			return;
+		}
+		disc.block = M._pcsx2web_disc_block() >>> 0;
+		disc.gamePtr = typeof M._pcsx2web_game === 'function' ? M._pcsx2web_game() >>> 0 : 0;
+		let worker;
+		try {
+			worker = new Worker(DISC_WORKER_FILE);
+		} catch (err) {
+			discReaderGone(`Could not start the disc reader: ${errorText(err)}`);
+			return;
+		}
+		const restarted = disc.restarting;
+		const lock = discLockName();
+		disc.worker = worker;
+		// The worker takes this lock before it writes anything into the memory, so even before it answers,
+		// being granted the lock means it is gone (or never got that far).
+		disc.workerLock = lock;
+		worker.onmessage = (e) => onDiscWorkerMessage(worker, e.data || {});
+		worker.onerror = (e) => {
+			e.preventDefault();
+			onDiscWorkerDied(worker, e.message || 'worker error');
+		};
+		const attach = { type: 'attach', memory: wasmMemory, block: disc.block };
+		if (lock)
+			attach.lock = lock;
+		if (resume)
+			attach.resume = resume;
+		discCall(attach).then((reply) => {
+			if (worker !== disc.worker)
+				return;
+			if (!reply.ok) {
+				onDiscWorkerDied(worker, reply.error ? reply.error.message : 'attach failed');
+				return;
+			}
+			disc.attached = true;
+			disc.restarting = false;
+			// A worker that could not take its lock is timed instead when it dies (whenDiscWorkerGone()).
+			if (!(reply.status && reply.status.lock))
+				disc.workerLock = '';
+			pageLog(`Disc reader ready (${reply.status && reply.status.loop} loop${lock && !disc.workerLock ? ', no lock' : ''}).`);
+			const d = disc.current;
+			if (restarted && d && d.opened) {
+				const kept = !!(resume && reply.status && reply.status.disc && reply.status.disc.generation === resume.generation);
+				if (kept) {
+					pageLog(`The new disc reader took over ${d.name}${vmLive() ? '; the game goes on reading it' : ''}.`);
+				} else {
+					const why = reply.status && reply.status.error ? reply.status.error.message : 'the disc was not in the request block';
+					pageLog(`The new disc reader could not take over ${d.name}: ${why}`, 'warn');
+					d.opened = false; // opened again below, under a new generation
+				}
+			}
+			reviewRunningDisc();
+			// A disc chosen before the runtime was ready, or one a restarted worker has to open again.
+			const next = disc.opening || (disc.current && !disc.current.opened ? disc.current : null);
+			if (next) {
+				disc.opening = next;
+				openDiscInWorker(next, disc.op);
+			} else {
+				render();
+				maybeAutoBoot();
+			}
+		});
+	}
+
+	function onDiscWorkerMessage(worker, m) {
+		if (worker !== disc.worker)
+			return;
+		if (m.status)
+			onDiscStatus(m.status);
+		if (m.type === 'reply') {
+			const resolve = disc.calls.get(m.id);
+			disc.calls.delete(m.id);
+			if (resolve)
+				resolve(m);
+		}
+	}
+
+	function onDiscStatus(status) {
+		const before = disc.status ? disc.status.state : '';
+		disc.status = status;
+		if (!disc.attached)
+			return; // a new worker's first words; its attach reply decides
+		if (status.state === 'stopped' && before !== 'stopped') {
+			// Its loop died: it handed back what it had taken, and a new worker takes over.
+			onDiscWorkerDied(disc.worker, (status.error && status.error.message) || 'the disc reader stopped');
+			return;
+		}
+		reviewRunningDisc();
+	}
+
+	// The disc as the running game sees it. The game reads the disc it booted with (that generation): a
+	// read error, or a reader that dropped that disc or opened it again under a new generation, leaves the
+	// game without it. Said once per loss, as a subtitle (the slate is hidden) and on the slate after Stop;
+	// when reads work again, a subtitle says so.
+	function reviewRunningDisc() {
+		const status = disc.status;
+		const d = disc.current;
+		if (!status || !disc.runIsDisc || !vmLive() || !d) {
+			if (status && status.state === 'ready')
+				disc.errorShown = false;
+			return;
+		}
+		const stranded = !status.disc || status.disc.generation !== disc.runGeneration;
+		if (stranded || status.state === 'error') {
+			if (disc.errorShown)
+				return;
+			disc.errorShown = true;
+			const err = (!stranded && status.error) ||
+				{ code: 'STALE', message: 'The disc reader no longer serves the disc the game booted with.' };
+			pageLog(`Disc read error: ${err.message}`, 'warn');
+			subtitle(discLostText(d, err), DISC_ERROR_MS);
+			page.error = discFailureText(d, err); // the slate shows it after Stop
+			page.errorIsDisc = true;
+		} else if (status.state === 'ready' && disc.errorShown) {
+			disc.errorShown = false;
+			pageLog('The disc can be read again.');
+			subtitle(DISC_COPY.readable);
+			if (page.errorIsDisc)
+				page.error = '';
+		}
+	}
+
+	function discLostText(d, err) {
+		if (d.kind !== 'url')
+			return DISC_COPY.lost;
+		return err && (err.code === 'TIMEOUT' || err.code === 'NETWORK') ? DISC_COPY.lostServer : DISC_COPY.lostUrl;
+	}
+
+	// Resolves once a terminated worker can no longer write into the emulator's memory: when the page is
+	// granted the Web Lock the worker held for its whole life (released only when nothing of it runs, a
+	// synchronous read into the memory included). Without the lock, after DISC_WORKER_GONE_MS.
+	function whenDiscWorkerGone(lock) {
+		const wait = () => new Promise((resolve) => setTimeout(resolve, DISC_WORKER_GONE_MS));
+		if (!lock)
+			return wait();
+		const slow = setTimeout(() => pageLog('Still waiting for the stopped disc reader to end.', 'warn'), 10000);
+		return navigator.locks.request(lock, () => {}).then(() => clearTimeout(slow), () => {
+			clearTimeout(slow);
+			return wait();
+		});
+	}
+
+	// The worker crashed or its loop died. Once it is gone (whenDiscWorkerGone), what it had taken is
+	// handed back (BUSY -> PENDING) and a new worker takes over the disc under the same generation; the
+	// block stays ready meanwhile, so the emulator's reads wait rather than fail. After the last restart,
+	// every waiting request fails instead.
+	function onDiscWorkerDied(worker, why) {
+		if (!worker || worker !== disc.worker)
+			return;
+		pageLog(`The disc reader stopped: ${why}`, 'error');
+		const lock = disc.workerLock;
+		disc.worker = null;
+		disc.workerLock = '';
+		disc.attached = false;
+		disc.restarting = true;
+		try {
+			worker.terminate();
+		} catch {
+			// gone already
+		}
+		for (const resolve of disc.calls.values())
+			resolve({ ok: false, error: { code: 'CANCELLED', message: why } });
+		disc.calls.clear();
+		const restart = disc.restarts++ < DISC_WORKER_RESTARTS;
+		render();
+		whenDiscWorkerGone(lock).then(() => {
+			if (disc.dead)
+				return;
+			if (restart) {
+				handBackDiscRequests();
+				startDiscWorker(discResumeFor(disc.current));
+			} else {
+				failDiscRequests();
+				discReaderGone('The disc reader kept failing; discs cannot be read until the page reloads.');
+			}
+		});
+	}
+
+	// Requests the dead worker had taken go back to pending, for the next worker.
+	function handBackDiscRequests() {
+		const v = discBlockView();
+		if (!v)
+			return;
+		let handed = 0;
+		for (let s = 0; s < v.slots; s++) {
+			if (Atomics.compareExchange(v.i32, v.hdr + DB_HEADER_WORDS + s * v.slotWords, DS_BUSY, DS_PENDING) === DS_BUSY)
+				handed++;
+		}
+		if (handed)
+			pageLog(`${handed} disc read${handed > 1 ? 's' : ''} handed to the next disc reader.`);
+	}
+
+	// No worker any more: stop the block and finish its pending and busy requests with CANCELLED, so no
+	// emulator thread waits for ever (DISC-DESIGN.md §7).
+	function failDiscRequests() {
+		const v = discBlockView();
+		if (!v)
+			return;
+		const { i32, hdr } = v;
+		Atomics.store(i32, hdr + DB_STATE, DB_STATE_STOPPED);
+		for (let s = 0; s < v.slots; s++) {
+			const base = hdr + DB_HEADER_WORDS + s * v.slotWords;
+			if (Atomics.compareExchange(i32, base, DS_PENDING, DS_BUSY) === DS_PENDING || Atomics.load(i32, base) === DS_BUSY) {
+				Atomics.store(i32, base + DS_RESULT, DE_CANCELLED);
+				Atomics.store(i32, base, DS_DONE);
+				Atomics.notify(i32, base);
+			}
+		}
+		Atomics.add(i32, hdr + DB_DOORBELL, 1);
+		Atomics.notify(i32, hdr + DB_DOORBELL);
+	}
+
+	// ---- boot and the running game
+
+	// Before a disc boot the worker reads the start of the disc, so a disc that went away (a moved file, a
+	// stopped server) is said on the slate instead of hanging the boot in PCSX2's disc detection.
+	function discNeedsCheck() {
+		const d = disc.current;
+		return !!(d && d.opened && !disc.dead && disc.attached);
+	}
+
+	function checkDiscThenBoot() {
+		const d = disc.current;
+		const op = disc.op;
+		disc.checking = true;
+		render();
+		discCall({ type: 'check' }).then((reply) => {
+			disc.checking = false;
+			if (op !== disc.op || disc.current !== d) {
+				render();
+				return;
+			}
+			if (!reply.ok && reply.error && reply.error.code === 'CANCELLED') {
+				// The disc reader stopped during the check and is being restarted: nothing was learnt.
+				pageLog(`The disc check was interrupted: ${reply.error.message}`, 'warn');
+				render();
+				return;
+			}
+			if (!reply.ok) {
+				page.autoBoot = false;
+				pageLog(`The disc can't be read: ${reply.error ? reply.error.message : 'unknown error'}`, 'warn');
+				discError(discFailureText(d, reply.error));
+				return;
+			}
+			startVm(true);
+		});
+	}
+
+	// startVm(): a disc boot when a disc is open, otherwise the BIOS alone.
+	function bootRequest() {
+		const d = disc.current;
+		disc.runIsDisc = !!(d && d.opened && !disc.dead);
+		disc.runTitle = '';
+		disc.runSerial = '';
+		disc.errorShown = false;
+		disc.runGeneration = disc.status && disc.status.disc ? disc.status.disc.generation : 0;
+		if (!disc.runIsDisc)
+			return api.boot(page.bios.name);
+		const flags = params.get('fastboot') === '0' ? DISC_BOOT_FULL : 0;
+		pageLog(`Disc boot: ${d.path} (${d.sourceName || d.name}), ${flags ? 'full boot' : 'fast boot'}.`);
+		return window.Module.ccall('pcsx2web_boot_disc', 'number', ['string', 'string', 'number'], [page.bios.name, d.path, flags]);
+	}
+
+	const utf8Decoder = new TextDecoder();
+	function cString(bytes) {
+		const end = bytes.indexOf(0);
+		return utf8Decoder.decode(end < 0 ? bytes : bytes.subarray(0, end));
+	}
+
+	// The game PCSX2 reports (Host::OnGameChanged), read through the seqlock in pcsx2web_game().
+	function readGameDetails() {
+		const buf = heapBuffer();
+		if (!buf || !disc.gamePtr || disc.gamePtr + GAME_SERIAL_AT + GAME_SERIAL_BYTES + GAME_TITLE_BYTES > buf.byteLength)
+			return;
+		const words = new Uint32Array(buf, disc.gamePtr, 3);
+		const seq = Atomics.load(words, 0);
+		if (seq === disc.gameSeq || (seq & 1))
+			return;
+		const copy = new Uint8Array(buf, disc.gamePtr + GAME_SERIAL_AT, GAME_SERIAL_BYTES + GAME_TITLE_BYTES).slice();
+		if (Atomics.load(words, 0) !== seq)
+			return; // rewritten meanwhile: the next tick reads it again
+		disc.gameSeq = seq;
+		const serial = cString(copy.subarray(0, GAME_SERIAL_BYTES));
+		const title = cString(copy.subarray(GAME_SERIAL_BYTES));
+		const live = page.vmState === STATE.STARTING || page.vmState === STATE.RUNNING;
+		if (!disc.runIsDisc || !live || !title || (title === disc.runTitle && serial === disc.runSerial))
+			return;
+		disc.runTitle = title;
+		disc.runSerial = serial;
+		pageLog(`Game: ${title}${serial ? ` (${serial})` : ''}`);
+		const d = disc.current;
+		if (d && d.title !== title) {
+			d.title = title;
+			if (d.remembered)
+				rememberDisc(d);
+		}
+		render();
+	}
+
+	function discTick() {
+		if (page.phase === 'ready') {
+			readGameDetails();
+			if (page.vmState !== disc.lastVm) {
+				disc.lastVm = page.vmState;
+				if (page.vmState === STATE.STOPPED || page.vmState === STATE.FAILED)
+					checkMemoryCards(true); // a normal Stop closed the card: keep it now
+			}
+		}
+		checkMemoryCards(false);
+		const title = disc.runIsDisc && disc.runTitle && pageState() === 'running' ? `${disc.runTitle} · TabStationToo` : 'TabStationToo';
+		if (document.title !== title)
+			document.title = title;
+	}
+
+	// ---- the slate, the disc menu
+
+	function memcardLine() {
+		if (memcards.otherTab)
+			return DISC_COPY.savesOtherTab;
+		if (memcards.failed)
+			return DISC_COPY.savesVisit;
+		// Before the runtime mounts the cards, the line says what will happen.
+		return memcards.persistent || (!memcards.mounted && typeof indexedDB !== 'undefined') ? DISC_COPY.savesKept : DISC_COPY.savesVisit;
+	}
+
+	function discLine(d) {
+		return [{ name: d.name }, { sep: 1 }, ...discSizeParts(d.size), { sep: 1 }, discWhere(d)];
+	}
+
+	// slateModel() fills the model for the BIOS alone; this adds the disc (UI-SPEC.md §10).
+	function applyDiscToSlate(state, m) {
+		const d = disc.current;
+		const b = page.bios;
+		switch (state) {
+		case 'nobios':
+			if (d || disc.opening)
+				m.fine.unshift([{ name: (d || disc.opening).name }, DISC_COPY.waiting]);
+			break;
+		case 'ready':
+			if (!disc.dead)
+				m.disc = d ? DISC_COPY.another : DISC_COPY.choose;
+			if (d) {
+				m.title = [discDisplayTitle(d)];
+				m.body = discLine(d);
+				m.alt = false; // the BIOS changes from its menu
+				m.remove = true;
+				m.fine = [[b ? DISC_COPY.withBios(biosTitle(b.name)) + ' ' : '', memcardLine()]];
+			} else if (disc.remembered && !disc.dead) {
+				m.fine = [[DISC_COPY.lastDisc, { name: disc.remembered.name }, { sep: 1 }, { discLink: DISC_COPY.openAgain }]];
+			}
+			break;
+		case 'queued':
+			if (d)
+				m.body = discLine(d);
+			break;
+		case 'starting':
+			if (disc.runIsDisc && d && page.vmState !== STATE.RUNNING)
+				m.body = [{ name: d.name }, { sep: 1 }, { num: Math.max(0, Math.floor((performance.now() - page.bootAt) / 1000)), unit: 's' }];
+			break;
+		case 'stopped':
+			if (disc.runIsDisc) {
+				const title = disc.runTitle || (d ? discDisplayTitle(d) : '');
+				m.body = page.ranMs ? [title, { sep: 1 }, 'ran ', { num: fmtDuration(page.ranMs) }] : [title];
+			}
+			if (!disc.dead)
+				m.disc = d ? DISC_COPY.another : DISC_COPY.choose;
+			break;
+		case 'failed':
+			if (disc.runIsDisc && d)
+				m.body = ['PCSX2 couldn’t boot ', { name: d.name }, '. The end of the log:'];
+			if (!disc.dead)
+				m.disc = d ? DISC_COPY.another : DISC_COPY.choose;
+			break;
+		default:
+			break;
+		}
+	}
+
+	function discMenuOpen() {
+		try {
+			return discEls.menu.matches(':popover-open');
+		} catch {
+			return false;
+		}
+	}
+
+	function hideDiscMenu() {
+		if (discMenuOpen())
+			discEls.menu.hidePopover();
+	}
+
+	function placeDiscMenu() {
+		const r = discEls.btn.getBoundingClientRect();
+		const width = Math.min(296, window.innerWidth - 32);
+		const left = Math.max(16, Math.min(r.left, window.innerWidth - width - 16));
+		discEls.menu.style.left = `${Math.round(left)}px`;
+		discEls.menu.style.bottom = `${Math.round(Math.max(8, window.innerHeight - r.top + 8))}px`;
+	}
+
+	function renderDiscMenu() {
+		const d = disc.current;
+		setData('disc', d ? 'set' : 'none');
+		if (!d || page.phase === 'dead' || page.phase === 'unsupported') {
+			hideDiscMenu();
+			return;
+		}
+		setText(discEls.btnName, discDisplayTitle(d));
+		setText(discEls.menuName, d.name);
+		rich(discEls.menuWhere, [...discSizeParts(d.size), { sep: 1 }, discWhere(d)]);
+		const locked = !canChangeBios();
+		for (const item of [discEls.menuChoose, discEls.menuRemove]) {
+			if (locked) {
+				item.setAttribute('aria-disabled', 'true');
+				item.setAttribute('aria-describedby', 'disc-menu-reason');
+			} else {
+				item.removeAttribute('aria-disabled');
+				item.removeAttribute('aria-describedby');
+			}
+		}
+		discEls.menuReason.hidden = !locked;
+	}
+
+	// ---- remembering the disc (File System Access handles, Chromium)
+
+	function discIdbOpen() {
+		return new Promise((resolve, reject) => {
+			if (!('indexedDB' in window)) {
+				reject(new Error('IndexedDB is not available'));
+				return;
+			}
+			const req = indexedDB.open(DISC_IDB_NAME, 1);
+			req.onupgradeneeded = () => req.result.createObjectStore(DISC_IDB_STORE);
+			req.onsuccess = () => resolve(req.result);
+			req.onerror = () => reject(req.error);
+			req.onblocked = () => reject(new Error('IndexedDB open blocked'));
+		});
+	}
+
+	async function discIdb(mode, fn) {
+		const db = await discIdbOpen();
+		try {
+			return await new Promise((resolve, reject) => {
+				const tx = db.transaction(DISC_IDB_STORE, mode);
+				const req = fn(tx.objectStore(DISC_IDB_STORE));
+				let result;
+				req.onsuccess = () => { result = req.result; };
+				tx.oncomplete = () => resolve(result);
+				tx.onerror = () => reject(tx.error || req.error);
+				tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+			});
+		} finally {
+			db.close();
+		}
+	}
+
+	async function rememberDisc(d) {
+		if (!d.handle)
+			return;
+		const rec = {
+			handle: d.handle, name: d.sourceName || d.name, size: d.size,
+			lastModified: (d.file && d.file.lastModified) || 0, title: d.title || '', savedAt: Date.now(),
+		};
+		try {
+			await discIdb('readwrite', (s) => s.put(rec, DISC_IDB_KEY));
+		} catch (err) {
+			pageLog(`Could not remember the disc in this browser: ${err && err.message}`, 'warn');
+			return;
+		}
+		if (disc.current !== d && disc.opening !== d) {
+			// Removed or replaced while being saved: do not bring it back next visit.
+			if (!disc.current || !disc.current.remembered)
+				forgetRememberedDisc();
+			return;
+		}
+		d.remembered = true;
+		disc.remembered = rec;
+		render();
+	}
+
+	async function forgetRememberedDisc() {
+		const had = disc.remembered;
+		disc.remembered = null;
+		try {
+			await discIdb('readwrite', (s) => s.delete(DISC_IDB_KEY));
+		} catch (err) {
+			if (had)
+				pageLog(`Could not forget the disc: ${err && err.message}`, 'warn');
+		}
+	}
+
+	async function loadRememberedDisc() {
+		if (typeof window.showOpenFilePicker !== 'function')
+			return; // without the File System Access API there is nothing to reopen
+		let rec = null;
+		try {
+			rec = await discIdb('readonly', (s) => s.get(DISC_IDB_KEY));
+		} catch (err) {
+			pageLog(`Could not read the remembered disc: ${err && err.message}`, 'warn');
+			return;
+		}
+		if (!rec || !rec.handle || typeof rec.handle.requestPermission !== 'function' || disc.current || disc.opening)
+			return;
+		disc.remembered = rec;
+		pageLog(`Last disc: ${rec.name} (reopens with one press).`);
+		render();
+	}
+
+	// ---- memory cards
+	// Slot 1's card lives in /memcards, an IDBFS (IndexedDB) mount made before main() runs, so it outlives
+	// a reload. One tab owns the cards: the one holding the MEMCARD_LOCK Web Lock, for as long as it is
+	// open. Only the owner copies them to IndexedDB, so a second tab can never overwrite the first one's
+	// saves with its older card; its own saves last for its visit (the slate says so).
+	// PCSX2 keeps the card file open and writes it in place (unbuffered on wasm), so the copy is driven from
+	// here: once the writes have been quiet for MEMCARD_QUIET_MS, at once when the PS2 stops, and when the
+	// page is hidden. FS.syncfs copies only files whose time changed; for an 8 MB card that blocks this
+	// thread for 30-50 ms. The copy is asynchronous and cannot finish during an unload, so from the first write
+	// until the copy is done, leaving or reloading the page asks first (beforeunload).
+
+	const MEMCARD_DIR = '/memcards';
+	const MEMCARD_QUIET_MS = 1500;
+	const MEMCARD_LOCK = 'tabstationtoo-memcards';
+	const MEMCARD_LOCK_WAIT_MS = 2000; // on a reload, the page being replaced may hold the lock a moment longer
+	const memcards = {
+		mounted: false, persistent: false, failed: false, owner: false, otherTab: false,
+		seen: '', changedAt: 0, saved: '', syncing: false, again: false, warned: false, guarded: false,
+	};
+
+	// Resolves true once this tab owns the cards, false when another tab keeps them.
+	function claimMemoryCards() {
+		const locks = navigator.locks;
+		if (!locks || typeof locks.request !== 'function')
+			return Promise.resolve(true); // no Web Locks: every tab copies its card, as without this
+		return new Promise((resolve) => {
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), MEMCARD_LOCK_WAIT_MS);
+			locks.request(MEMCARD_LOCK, { signal: controller.signal }, () => {
+				clearTimeout(timer);
+				resolve(true);
+				return new Promise(() => {}); // held until the page goes away
+			}).catch(() => {
+				clearTimeout(timer);
+				resolve(false);
+			});
+		});
+	}
+
+	// Card writes reach the file system on this thread (Emscripten runs a pthread's file calls here), so
+	// they are seen as they happen: the unload guard is up from the first write of a save.
+	function watchMemcardWrites(FS) {
+		const write = FS.write;
+		if (typeof write !== 'function' || write.memcardWatch)
+			return;
+		const watched = function (stream) {
+			const result = write.apply(this, arguments);
+			if (stream && typeof stream.path === 'string' && stream.path.startsWith(`${MEMCARD_DIR}/`))
+				onMemcardWrite();
+			return result;
+		};
+		watched.memcardWatch = true;
+		FS.write = watched;
+	}
+
+	function onMemcardWrite() {
+		memcards.changedAt = performance.now();
+		if (memcards.owner && memcards.persistent)
+			setMemcardGuard(true);
+	}
+
+	function onBeforeUnloadWithCard(e) {
+		persistMemoryCards();
+		e.preventDefault();
+		e.returnValue = ''; // browsers before preventDefault() was honoured here
+	}
+
+	// Only while a write is not in IndexedDB yet: a beforeunload listener also keeps the page out of the
+	// back/forward cache in some browsers.
+	function setMemcardGuard(on) {
+		if (on === memcards.guarded)
+			return;
+		memcards.guarded = on;
+		if (on)
+			window.addEventListener('beforeunload', onBeforeUnloadWithCard);
+		else
+			window.removeEventListener('beforeunload', onBeforeUnloadWithCard);
+	}
+
+	// Module.preRun: before main(), so PCSX2 finds the cards that were saved.
+	function mountMemoryCards() {
+		const M = window.Module;
+		const FS = M.FS;
+		try {
+			FS.mkdir(MEMCARD_DIR);
+		} catch {
+			// exists
+		}
+		const IDBFS = FS.filesystems && FS.filesystems.IDBFS;
+		if (!IDBFS || typeof indexedDB === 'undefined') {
+			memcards.failed = true;
+			pageLog('IndexedDB is not available: the memory card lasts for this visit only.', 'warn');
+			return;
+		}
+		try {
+			FS.mount(IDBFS, {}, MEMCARD_DIR);
+		} catch (err) {
+			memcards.failed = true;
+			pageLog(`Could not keep memory cards in this browser: ${errorText(err)}`, 'warn');
+			return;
+		}
+		memcards.mounted = true;
+		watchMemcardWrites(FS);
+		M.addRunDependency('memcards');
+		claimMemoryCards().then((owner) => {
+			memcards.owner = owner;
+			memcards.otherTab = !owner;
+			if (!owner)
+				pageLog('TabStationToo is open in another tab, which keeps the memory card: saves in this tab last for this visit only.', 'warn');
+			// Loaded after the lock: the page a reload replaced has made its last copy by then.
+			FS.syncfs(true, (err) => {
+				if (err) {
+					memcards.failed = true;
+					pageLog(`Could not load the memory cards from this browser: ${errorText(err)}`, 'warn');
+				} else {
+					memcards.persistent = true;
+				}
+				memcards.seen = memcards.saved = memcardSignature();
+				if (memcards.saved)
+					pageLog(`Memory cards from this browser: ${memcards.saved.split(';').filter(Boolean).map((e) => e.split(':')[0]).join(', ')}`);
+				M.removeRunDependency('memcards');
+			});
+		});
+	}
+
+	function memcardSignature() {
+		const FS = window.Module && window.Module.FS;
+		if (!FS)
+			return '';
+		let sig = '';
+		try {
+			for (const name of FS.readdir(MEMCARD_DIR)) {
+				if (name === '.' || name === '..')
+					continue;
+				const st = FS.stat(`${MEMCARD_DIR}/${name}`);
+				sig += `${name}:${st.size}:${st.mtime.getTime()};`;
+			}
+		} catch {
+			// no folder yet
+		}
+		return sig;
+	}
+
+	function checkMemoryCards(now) {
+		if (!memcards.persistent || !memcards.owner)
+			return;
+		const sig = memcardSignature();
+		const t = performance.now();
+		if (sig !== memcards.seen) {
+			memcards.seen = sig;
+			memcards.changedAt = t;
+		}
+		const unsaved = sig !== memcards.saved;
+		setMemcardGuard(unsaved || memcards.syncing);
+		if (unsaved && (now || t - memcards.changedAt >= MEMCARD_QUIET_MS))
+			persistMemoryCards();
+	}
+
+	function persistMemoryCards() {
+		if (!memcards.persistent || !memcards.owner)
+			return;
+		if (memcards.syncing) {
+			memcards.again = true;
+			return;
+		}
+		const sig = memcardSignature();
+		if (sig === memcards.saved) {
+			setMemcardGuard(false);
+			return;
+		}
+		memcards.syncing = true;
+		setMemcardGuard(true);
+		window.Module.FS.syncfs(false, (err) => {
+			memcards.syncing = false;
+			if (err) {
+				pageLog(`Could not save the memory card in this browser: ${errorText(err)}`, 'warn');
+				if (!memcards.warned) {
+					memcards.warned = true;
+					subtitle(DISC_COPY.memcardFailed);
+				}
+			} else {
+				memcards.saved = sig;
+				pageLog('Memory card saved in this browser.');
+			}
+			if (memcards.again) {
+				memcards.again = false;
+				persistMemoryCards();
+			} else {
+				// A write during the copy keeps the guard up until the next copy.
+				setMemcardGuard(memcardSignature() !== memcards.saved);
+			}
+		});
+	}
+
+	// ---- wiring
+
+	function wireDiscUi() {
+		discEls.slateDisc.addEventListener('click', openDiscPicker);
+		discEls.slateRemove.addEventListener('click', removeDisc);
+		discEls.input.addEventListener('change', () => {
+			const file = discEls.input.files && discEls.input.files[0];
+			discEls.input.value = '';
+			acceptDiscFile(file, null);
+		});
+
+		discEls.menu.addEventListener('beforetoggle', (e) => {
+			if (e.newState === 'open') {
+				renderDiscMenu();
+				placeDiscMenu();
+			}
+		});
+		discEls.menu.addEventListener('toggle', (e) => {
+			const open = e.newState === 'open';
+			discEls.btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+			if (open) {
+				discEls.menuChoose.focus({ preventScroll: true });
+			} else {
+				const a = document.activeElement;
+				if (!a || a === document.body || discEls.menu.contains(a))
+					discEls.btn.focus({ preventScroll: true });
+			}
+			updateChrome();
+		});
+		discEls.menu.addEventListener('focusout', (e) => {
+			const to = e.relatedTarget;
+			if (to && !discEls.menu.contains(to) && to !== discEls.btn)
+				hideDiscMenu();
+		});
+		discEls.menuChoose.addEventListener('click', () => {
+			if (discEls.menuChoose.getAttribute('aria-disabled') !== 'true')
+				openDiscPicker();
+		});
+		discEls.menuRemove.addEventListener('click', () => {
+			if (discEls.menuRemove.getAttribute('aria-disabled') !== 'true')
+				removeDisc();
+		});
+		window.addEventListener('resize', () => {
+			if (discMenuOpen())
+				placeDiscMenu();
+		});
+
+		// Keep the memory card when the page goes into the background, and start the copy when it goes
+		// away (the unload guard has asked first while a write was not copied yet).
+		window.addEventListener('pagehide', persistMemoryCards);
+		document.addEventListener('visibilitychange', () => {
+			if (document.visibilityState === 'hidden')
+				persistMemoryCards();
+		});
+	}
+
+	// Read-only hooks for automated tests, next to window.PCSX2Web.
+	window.PCSX2WebDisc = Object.freeze({
+		stats: () => ({
+			disc: disc.current ? { name: disc.current.name, path: disc.current.path, size: disc.current.size,
+				kind: disc.current.kind, opened: disc.current.opened, title: disc.current.title,
+				remembered: disc.current.remembered } : null,
+			opening: !!disc.opening,
+			reader: disc.dead ? 'dead' : disc.restarting ? 'restarting' : disc.status ? disc.status.state : 'none',
+			readerError: disc.status && disc.status.error ? { ...disc.status.error } : null,
+			readerGeneration: disc.status && disc.status.disc ? disc.status.disc.generation : null,
+			readerLock: !!disc.workerLock,
+			restarts: disc.restarts,
+			runGeneration: disc.runGeneration,
+			readerStats: disc.status ? { ...disc.status.stats } : null,
+			game: { title: disc.runTitle, serial: disc.runSerial, disc: disc.runIsDisc },
+			lastDisc: disc.remembered ? disc.remembered.name : null,
+			memcards: { persistent: memcards.persistent, owner: memcards.owner, otherTab: memcards.otherTab, failed: memcards.failed,
+				saved: memcards.saved, syncing: memcards.syncing, unloadGuard: memcards.guarded },
+		}),
+	});
+
+	// ------------------------------------------------------------------ audio (UI-SPEC.md §11)
+	// The PS2's sound (docs/web-port/AUDIO-DESIGN.md). pcsx2web_audio_start() loads the emulator's module into the
+	// AudioContext's worklet scope and makes one node for the page's lifetime. Its callback reads PCSX2's audio stream
+	// on the browser's audio thread; the CPU thread attaches the stream while the context renders and drains it
+	// otherwise. This thread owns only the context (made in a user gesture, at 48 kHz), the gain (volume and mute) and
+	// what the Sound control shows: no sample passes through it.
+
+	const AUDIO_RATE = 48000;
+	const AUDIO_GAIN_TIME = 0.015; // s, time constant of gain changes, so they never click
+	const AUDIO_STOP_FADE = 0.03; // s, the fade before the context is suspended after Stop
+	const AUDIO_HELD_AFTER_MS = 300; // a resume() still pending this long means the browser holds the sound
+	const PREF_VOLUME = 'pcsx2web.volume';
+	const PREF_MUTED = 'pcsx2web.muted';
+	const AUDIO_TAP_FILE = 'audio-tap.js';
+	const AUDIO_TAP_NAME = 'tabstationtoo-tap';
+	// pcsx2web_audio(): the audio block's words (AUDIO-DESIGN.md 4.5).
+	const AUDIO_BLOCK = ['magic', 'version', 'worklet', 'streamRate', 'attached', 'heartbeat', 'frames', 'shortQuanta',
+		'drained', 'contextRate', 'bufferMs', 'fill', 'attaches', 'steps', 'streams', 'reserved'];
+	const AUDIO_BLOCK_MAGIC = 0x44554154; // "TAUD"
+	const AUDIO_WORKLET_STATES = ['none', 'starting', 'running', 'failed'];
+
+	const SOUND_COPY = {
+		percent: (v) => `${v}%`,
+		valueText: (v) => `${v} percent`,
+		// The button's accessible name: its label, then the state.
+		name: {
+			on: (v) => `Sound, ${v} percent`,
+			muted: 'Sound, muted',
+			held: 'Sound, waiting for a key or click',
+			unavailable: 'Sound, unavailable',
+		},
+		off: 'Sound off.',
+		on: 'Sound on.',
+		heldHint: 'Press a key or click to turn the sound on.',
+		heldNote: 'The browser holds the sound until you press a key or click.',
+		unavailable: 'This browser can’t play the emulator’s sound.',
+	};
+
+	const soundEls = {
+		btn: $('btn-sound'),
+		icon: $('btn-sound-icon'),
+		menu: $('sound-menu'),
+		volume: $('sound-volume'),
+		value: $('sound-value'),
+		mute: $('sound-mute'),
+		note: $('sound-note'),
+	};
+
+	// Test switches (UI-SPEC.md §11): ?mute=1, ?audio=null, ?audiotap=SECONDS, ?audiorate=HZ (the context's rate,
+	// to exercise the emulator's resampling as PS1 mode would).
+	const audioTapSeconds = (() => {
+		const v = Number(params.get('audiotap'));
+		return Number.isFinite(v) && v > 0 ? Math.min(v, 3600) : 0;
+	})();
+	const audioRate = (() => {
+		const v = Number(params.get('audiorate'));
+		return Number.isInteger(v) && v >= 8000 && v <= 192000 ? v : AUDIO_RATE;
+	})();
+
+	const audio = {
+		off: params.get('audio') === 'null', // the emulator runs with PCSX2's Null backend: no sound at all
+		testMute: params.get('mute') === '1',
+		ctx: null,
+		gain: null,
+		node: null,
+		tap: null,
+		tapReady: null, // the tap's addModule() promise
+		blockPtr: 0,
+		volume: 100,
+		muted: false,
+		wanted: false, // queued, starting or running: sound should play
+		started: false, // pcsx2web_audio_start() was called
+		startAt: 0,
+		failed: '', // why sound is unavailable
+		resumeAt: 0, // performance.now() of the last resume() asked for
+		resumeTried: false, // the one resume() without a gesture after the browser suspended the context
+		suspendTimer: 0,
+		renderTimer: 0,
+		firstFrameSaid: false, // the held or unavailable subtitle, once per visit
+		capture: { blocks: [], frames: 0, stored: 0, dropped: 0, next: -1, gaps: 0, firstAt: -1 },
+	};
+
+	function audioSupported() {
+		return typeof AudioContext === 'function' && typeof AudioWorkletNode === 'function' && !!window.isSecureContext;
+	}
+
+	// Calls arriving from the emulator's callbacks (inside wasm) must never throw back into it.
+	function audioGuard(fn) {
+		return (...args) => {
+			try {
+				fn(...args);
+			} catch (err) {
+				pageLog(`Sound: ${errorText(err)}`, 'warn');
+			}
+		};
+	}
+
+	function audioGainTarget() {
+		return audio.muted || audio.volume === 0 ? 0 : (audio.volume / 100) ** 2;
+	}
+
+	function applyAudioGain() {
+		if (!audio.gain)
+			return;
+		const g = audio.gain.gain;
+		const t = audio.ctx.currentTime;
+		g.cancelScheduledValues(t);
+		g.setTargetAtTime(audio.testMute ? 0 : audioGainTarget(), t, AUDIO_GAIN_TIME);
+	}
+
+	function audioFail(why) {
+		if (audio.failed)
+			return;
+		audio.failed = why;
+		pageLog(`Sound is unavailable: ${why}`, 'warn');
+		if (audio.node) {
+			try {
+				audio.node.disconnect();
+			} catch {
+				// already disconnected
+			}
+		}
+		renderSound();
+		if (pageState() === 'running')
+			audioFirstFrameHint();
+	}
+
+	// The test switch ?audio=null: main() keeps PCSX2's Null backend (Module.arguments).
+	function audioModuleArguments() {
+		return audio.off ? ['-audio-null'] : [];
+	}
+
+	// Inside a user gesture (Boot, a queued boot's press), or for a boot without one (?bios=): makes the context
+	// once and asks it to run. A context made without a gesture stays suspended until the first key or click.
+	function audioUnlock() {
+		if (audio.off || audio.failed)
+			return;
+		if (!audio.ctx) {
+			if (!audioSupported()) {
+				audioFail('this browser has no AudioWorklet (or the page is not a secure context).');
+				return;
+			}
+			try {
+				audio.ctx = new AudioContext({ sampleRate: audioRate, latencyHint: 'interactive' });
+			} catch (err) {
+				pageLog(`Sound: no ${audioRate} Hz AudioContext (${errorText(err)}); using the device's rate.`, 'warn');
+				try {
+					audio.ctx = new AudioContext({ latencyHint: 'interactive' });
+				} catch (err2) {
+					audioFail(`the AudioContext could not be made (${errorText(err2)}).`);
+					return;
+				}
+			}
+			audio.gain = audio.ctx.createGain();
+			audio.gain.gain.value = audio.testMute ? 0 : audioGainTarget();
+			audio.gain.connect(audio.ctx.destination);
+			audio.ctx.addEventListener('statechange', onAudioStateChange);
+			if (audioTapSeconds) {
+				audio.tapReady = audio.ctx.audioWorklet.addModule(AUDIO_TAP_FILE).then(() => true, (err) => {
+					pageLog(`Sound: the test tap did not load (${errorText(err)}).`, 'warn');
+					return false;
+				});
+			}
+			pageLog(`Sound: AudioContext at ${audio.ctx.sampleRate} Hz, ${audio.ctx.state}.`);
+			audioStart();
+		}
+		audioResume();
+	}
+
+	function audioResume() {
+		const ctx = audio.ctx;
+		if (!ctx || ctx.state === 'running' || ctx.state === 'closed')
+			return;
+		clearTimeout(audio.suspendTimer);
+		audio.suspendTimer = 0;
+		audio.resumeAt = performance.now();
+		ctx.resume().catch(() => {}); // stays pending while the browser holds the sound
+		clearTimeout(audio.renderTimer);
+		audio.renderTimer = setTimeout(renderSound, AUDIO_HELD_AFTER_MS + 20);
+	}
+
+	// Once per page, once the runtime is ready and a context exists.
+	function audioStart() {
+		if (audio.started || audio.failed || !audio.ctx || !api)
+			return;
+		const M = window.Module;
+		if (typeof M._pcsx2web_audio_start !== 'function' || typeof M._pcsx2web_audio !== 'function') {
+			audioFail('this build of the emulator has no audio exports.');
+			return;
+		}
+		audio.started = true;
+		audio.startAt = performance.now();
+		audio.blockPtr = M._pcsx2web_audio() >>> 0;
+		M.pcsx2webAudioContext = audio.ctx;
+		M.pcsx2webAudioReady = audioGuard(onAudioNode);
+		let result;
+		try {
+			result = M._pcsx2web_audio_start();
+		} catch (err) {
+			audioFail(`pcsx2web_audio_start failed (${errorText(err)}).`);
+			return;
+		}
+		if (result !== 0)
+			audioFail(`pcsx2web_audio_start returned ${result}.`);
+	}
+
+	// From the emulator, once its worklet node exists (or null when it could not start).
+	function onAudioNode(node) {
+		if (!node) {
+			audioFail('the audio worklet did not start.');
+			return;
+		}
+		audio.node = node;
+		node.addEventListener('processorerror', () => audioFail('the audio worklet stopped with an error.'));
+		pageLog(`Sound: worklet running ${Math.round(performance.now() - audio.startAt)} ms after its start.`);
+		if (audio.tapReady)
+			audio.tapReady.then(audioGuard(connectAudioTap));
+		else
+			node.connect(audio.gain);
+		renderSound();
+	}
+
+	// ?audiotap: the worklet's output goes through a recording tap (audio-tap.js) before the gain.
+	function connectAudioTap(loaded) {
+		if (!loaded || audio.failed) {
+			if (!audio.failed)
+				audio.node.connect(audio.gain);
+			return;
+		}
+		audio.tap = new AudioWorkletNode(audio.ctx, AUDIO_TAP_NAME, {
+			numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit',
+		});
+		audio.tap.port.onmessage = (e) => onAudioTapBlock(e.data);
+		audio.node.connect(audio.tap);
+		audio.tap.connect(audio.gain);
+		pageLog(`Sound: test tap recording up to ${audioTapSeconds} s.`);
+	}
+
+	function onAudioTapBlock(b) {
+		const c = audio.capture;
+		if (c.next >= 0 && b.at !== c.next)
+			c.gaps++;
+		c.next = b.at + b.l.length;
+		c.frames += b.l.length;
+		if (c.firstAt < 0)
+			c.firstAt = b.at;
+		if (c.stored + b.l.length > audioTapSeconds * audio.ctx.sampleRate) {
+			c.dropped += b.l.length;
+			return;
+		}
+		c.blocks.push(b);
+		c.stored += b.l.length;
+	}
+
+	// The recorded frames since the last call, interleaved float32 little-endian, as base64.
+	function takeAudioCapture() {
+		const c = audio.capture;
+		const frames = c.blocks.reduce((n, b) => n + b.l.length, 0);
+		const out = new Float32Array(frames * 2);
+		let i = 0;
+		for (const b of c.blocks) {
+			for (let k = 0; k < b.l.length; k++) {
+				out[i++] = b.l[k];
+				out[i++] = b.r[k];
+			}
+		}
+		const firstAt = c.blocks.length ? c.blocks[0].at : -1;
+		c.blocks = [];
+		const bytes = new Uint8Array(out.buffer);
+		let bin = '';
+		for (let k = 0; k < bytes.length; k += 0x8000)
+			bin += String.fromCharCode.apply(null, bytes.subarray(k, k + 0x8000));
+		return { frames, firstAt, rate: audio.ctx ? audio.ctx.sampleRate : 0, data: btoa(bin),
+			total: c.frames, dropped: c.dropped, gaps: c.gaps };
+	}
+
+	function readAudioBlock() {
+		const p = audio.blockPtr;
+		const buf = p ? heapBuffer() : null;
+		if (!buf || p + AUDIO_BLOCK.length * 4 > buf.byteLength)
+			return null;
+		const view = new Uint32Array(buf, p, AUDIO_BLOCK.length);
+		if (Atomics.load(view, 0) !== AUDIO_BLOCK_MAGIC)
+			return null;
+		const out = {};
+		AUDIO_BLOCK.forEach((name, i) => { out[name] = Atomics.load(view, i); });
+		out.worklet = AUDIO_WORKLET_STATES[out.worklet] || String(out.worklet);
+		return out;
+	}
+
+	// Called from render(): sound plays while the PS2 is queued, starting or running. Otherwise the gain fades and the
+	// context is suspended, so a stopped page costs no audio work; the next Boot resumes it.
+	function audioSync(state) {
+		const wanted = state === 'queued' || state === 'starting' || state === 'running';
+		if (wanted === audio.wanted)
+			return;
+		audio.wanted = wanted;
+		if (!audio.ctx)
+			return;
+		if (wanted) {
+			applyAudioGain();
+			audioResume();
+			return;
+		}
+		audioFadeOut();
+		clearTimeout(audio.suspendTimer);
+		audio.suspendTimer = setTimeout(() => {
+			audio.suspendTimer = 0;
+			if (!audio.wanted && audio.ctx.state === 'running')
+				audio.ctx.suspend().catch(() => {});
+		}, AUDIO_STOP_FADE * 1000 + 20);
+	}
+
+	function audioFadeOut() {
+		if (!audio.gain)
+			return;
+		const g = audio.gain.gain;
+		const t = audio.ctx.currentTime;
+		g.cancelScheduledValues(t);
+		g.setValueAtTime(g.value, t);
+		g.linearRampToValueAtTime(0, t + AUDIO_STOP_FADE);
+	}
+
+	function onAudioStateChange() {
+		const s = audio.ctx.state;
+		pageLog(`Sound: the AudioContext is ${s}.`);
+		if (s === 'running') {
+			audio.resumeTried = false;
+		} else if (audio.wanted && !audio.resumeTried && s !== 'closed') {
+			// Suspended or interrupted by the browser: one try now; the next key press or click tries again.
+			audio.resumeTried = true;
+			audioResume();
+		}
+		renderSound();
+	}
+
+	// Capture phase, before anything else sees the event; it is never consumed.
+	function onAudioGesture() {
+		if (audio.wanted && audio.ctx && audio.ctx.state !== 'running')
+			audioResume();
+	}
+
+	function soundView() {
+		if (audio.off || audio.failed)
+			return 'unavailable';
+		if (audio.wanted && audio.ctx && audio.ctx.state !== 'running' &&
+			performance.now() - audio.resumeAt >= AUDIO_HELD_AFTER_MS)
+			return 'held';
+		return audio.muted || audio.volume === 0 ? 'muted' : 'on';
+	}
+
+	function renderSound() {
+		const view = soundView();
+		const iconName = view === 'held' || view === 'unavailable' ? 'speaker-slash' : view === 'muted' ? 'speaker-x' :
+			audio.volume >= 50 ? 'speaker-high' : 'speaker-low';
+		if (soundEls.icon.getAttribute('href') !== icon(iconName))
+			soundEls.icon.setAttribute('href', icon(iconName));
+		const name = view === 'on' || (view === 'muted' && !audio.muted) ? SOUND_COPY.name.on(audio.volume) : SOUND_COPY.name[view];
+		if (soundEls.btn.getAttribute('aria-label') !== name)
+			soundEls.btn.setAttribute('aria-label', name);
+		soundEls.mute.setAttribute('aria-pressed', audio.muted ? 'true' : 'false');
+		if (Number(soundEls.volume.value) !== audio.volume)
+			soundEls.volume.value = String(audio.volume);
+		soundEls.volume.setAttribute('aria-valuetext', SOUND_COPY.valueText(audio.volume));
+		soundEls.volume.style.setProperty('--fill', `${audio.volume}%`);
+		setText(soundEls.value, SOUND_COPY.percent(audio.volume));
+		const note = view === 'held' ? SOUND_COPY.heldNote : view === 'unavailable' && !audio.off ? SOUND_COPY.unavailable : '';
+		setText(soundEls.note, note);
+		soundEls.note.hidden = !note;
+		setData('sound', view);
+	}
+
+	// With the first frame: the browser holds the sound, or the page cannot play it. Returns true when it said so
+	// (the first-boot hint then waits for the next boot).
+	function audioFirstFrameHint() {
+		if (audio.firstFrameSaid || audio.off)
+			return false;
+		const view = soundView();
+		const held = audio.wanted && audio.ctx && audio.ctx.state !== 'running' && !audio.muted;
+		if (view !== 'unavailable' && !held)
+			return false;
+		audio.firstFrameSaid = true;
+		subtitle(view === 'unavailable' ? SOUND_COPY.unavailable : SOUND_COPY.heldHint, HINT_MS);
+		return true;
+	}
+
+	function setVolume(v) {
+		audio.volume = Math.max(0, Math.min(100, Math.round(v / 5) * 5));
+		if (audio.muted) {
+			audio.muted = false; // moving the slider unmutes
+			writePref(PREF_MUTED, '0');
+		}
+		applyAudioGain();
+		renderSound();
+	}
+
+	function setMuted(muted, say) {
+		audio.muted = muted;
+		writePref(PREF_MUTED, muted ? '1' : '0');
+		applyAudioGain();
+		renderSound();
+		if (say)
+			subtitle(muted ? SOUND_COPY.off : SOUND_COPY.on);
+	}
+
+	// M: the key labelled M on any layout, unless it is one of the pad's keys there.
+	function isMuteKey(e) {
+		return (e.key === 'm' || e.key === 'M') && !e.shiftKey && !e.altKey && !PAD_CODES.has(e.code);
+	}
+
+	function soundMenuOpen() {
+		try {
+			return soundEls.menu.matches(':popover-open');
+		} catch {
+			return false;
+		}
+	}
+
+	function hideSoundMenu() {
+		if (soundMenuOpen())
+			soundEls.menu.hidePopover();
+	}
+
+	// Opens upward, right-aligned to its trigger.
+	function placeSoundMenu() {
+		const r = soundEls.btn.getBoundingClientRect();
+		const width = Math.min(296, window.innerWidth - 32);
+		const right = Math.max(16, Math.min(window.innerWidth - r.right, window.innerWidth - width - 16));
+		soundEls.menu.style.right = `${Math.round(right)}px`;
+		soundEls.menu.style.bottom = `${Math.round(Math.max(8, window.innerHeight - r.top + 8))}px`;
+	}
+
+	function loadSoundPrefs() {
+		const v = Number(readPref(PREF_VOLUME));
+		audio.volume = readPref(PREF_VOLUME) !== null && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v / 5) * 5)) : 100;
+		audio.muted = readPref(PREF_MUTED) === '1';
+	}
+
+	function wireSoundUi() {
+		loadSoundPrefs();
+		// Touch grants the activation on release, so pointerup too.
+		for (const type of ['keydown', 'pointerdown', 'pointerup'])
+			window.addEventListener(type, onAudioGesture, true);
+
+		soundEls.volume.addEventListener('input', () => setVolume(Number(soundEls.volume.value)));
+		soundEls.volume.addEventListener('change', () => writePref(PREF_VOLUME, String(audio.volume)));
+		soundEls.mute.addEventListener('click', () => setMuted(!audio.muted, false));
+
+		soundEls.menu.addEventListener('beforetoggle', (e) => {
+			if (e.newState === 'open') {
+				renderSound();
+				placeSoundMenu();
+			}
+		});
+		soundEls.menu.addEventListener('toggle', (e) => {
+			const open = e.newState === 'open';
+			soundEls.btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+			if (open) {
+				soundEls.volume.focus({ preventScroll: true });
+			} else {
+				const a = document.activeElement;
+				if (!a || a === document.body || soundEls.menu.contains(a))
+					soundEls.btn.focus({ preventScroll: true });
+			}
+			updateChrome();
+		});
+		// Like the BIOS menu: Tab (or anything else) taking focus out of it closes it.
+		soundEls.menu.addEventListener('focusout', (e) => {
+			const to = e.relatedTarget;
+			if (to && !soundEls.menu.contains(to) && to !== soundEls.btn)
+				hideSoundMenu();
+		});
+		window.addEventListener('resize', () => {
+			if (soundMenuOpen())
+				placeSoundMenu();
+		});
+		document.addEventListener('fullscreenchange', () => {
+			if (soundMenuOpen())
+				placeSoundMenu();
+		});
+		renderSound();
+	}
+
+	// Read-only hooks for automated tests, next to window.PCSX2Web. With ?audiotap, the recording too.
+	window.PCSX2WebAudio = Object.freeze({
+		stats: () => ({
+			supported: audioSupported(),
+			off: audio.off,
+			failed: audio.failed,
+			view: soundView(),
+			wanted: audio.wanted,
+			volume: audio.volume,
+			muted: audio.muted,
+			testMute: audio.testMute,
+			gainTarget: audioGainTarget(),
+			gain: audio.gain ? audio.gain.gain.value : null,
+			context: audio.ctx ? { state: audio.ctx.state, sampleRate: audio.ctx.sampleRate, currentTime: audio.ctx.currentTime,
+				baseLatency: audio.ctx.baseLatency, outputLatency: audio.ctx.outputLatency } : null,
+			node: !!audio.node,
+			tap: audio.tap ? { frames: audio.capture.frames, stored: audio.capture.stored, dropped: audio.capture.dropped,
+				gaps: audio.capture.gaps, firstAt: audio.capture.firstAt } : null,
+			block: readAudioBlock(),
+		}),
+		takeCapture: () => (audio.tap ? takeAudioCapture() : null),
+		// The browser suspending the context by itself (an interruption), for tests of the recovery.
+		interrupt: () => (audioTapSeconds && audio.ctx ? audio.ctx.suspend().then(() => audio.ctx.state) : null),
+	});
+
 	// ------------------------------------------------------------------ keyboard
 
 	function resolveKeyCodes() {
@@ -1475,7 +3374,7 @@
 		const a = document.activeElement;
 		if (!a || a === document.body || a === document.documentElement)
 			return captureActive();
-		if (els.biosMenu.contains(a) || els.about.contains(a))
+		if (els.biosMenu.contains(a) || discEls.menu.contains(a) || soundEls.menu.contains(a) || els.about.contains(a))
 			return false;
 		return els.theatre.contains(a);
 	}
@@ -1500,6 +3399,8 @@
 			action = () => toggleDrawer('keys');
 		} else if (e.code === 'Backquote' && !e.shiftKey && inShortcutScope()) {
 			action = () => toggleDrawer('log');
+		} else if (isMuteKey(e) && (inShortcutScope() || soundEls.menu.contains(document.activeElement))) {
+			action = () => setMuted(!audio.muted, true);
 		}
 		if (!action)
 			return false;
@@ -1519,7 +3420,7 @@
 
 	// Esc: native dialog/popover close first, then a drawer, then the keyboard.
 	function onEscape(e) {
-		if (els.about.open || menuOpen())
+		if (els.about.open || menuOpen() || discMenuOpen() || soundMenuOpen())
 			return;
 		dismissTips();
 		const a = document.activeElement;
@@ -1852,7 +3753,7 @@
 
 	function chromeMayHide() {
 		return pageState() === 'running' && captureActive() && document.hasFocus() &&
-			!page.drawer && !menuOpen() && !els.about.open && !subtitleOpen && !page.drag &&
+			!page.drawer && !menuOpen() && !discMenuOpen() && !soundMenuOpen() && !els.about.open && !subtitleOpen && !page.drag &&
 			!pointerOverChrome && !page.keepChrome && hoverQuery.matches;
 	}
 
@@ -2113,6 +4014,13 @@
 				b.textContent = p.logLink;
 				b.addEventListener('click', openLogFromSlate);
 				el.appendChild(b);
+			} else if (p.discLink !== undefined) {
+				const b = document.createElement('button');
+				b.type = 'button';
+				b.className = 'link-btn';
+				b.textContent = p.discLink;
+				b.addEventListener('click', reopenLastDisc);
+				el.appendChild(b);
 			}
 		}
 	}
@@ -2137,8 +4045,10 @@
 			if (page.vmState === STATE.RUNNING)
 				return page.frameSinceBoot ? 'running' : 'starting';
 		}
+		// A ?bios= file still on its way is already the chosen BIOS: cancelling its queued boot shows the
+		// title card it will land on, not the intake.
 		if (!page.bios)
-			return page.autoBoot && page.urlBiosName ? 'queued' : 'nobios';
+			return page.urlBiosName ? (page.autoBoot ? 'queued' : 'ready') : 'nobios';
 		if (page.autoBoot)
 			return 'queued';
 		if (page.outcome === 'failed')
@@ -2207,6 +4117,11 @@
 		return [{ name: b.name }, { sep: 1 }, ...sizeParts(b.size), { sep: 1 }, storedText(b)];
 	}
 
+	// The ?bios= file while it is being fetched: no size yet.
+	function fetchingBiosLine() {
+		return [{ name: page.urlBiosName || '' }, { sep: 1 }, COPY.stored.url];
+	}
+
 	// What the slate shows for a page state (copy from COPY). Null for running: the slate fades
 	// out with the content it had.
 	function slateModel(state) {
@@ -2218,7 +4133,7 @@
 		const bootPrimary = (label, iconName) => ({ label, icon: iconName, cap: true, action: boot });
 		if (page.drag && (state !== 'dead' && state !== 'unsupported')) {
 			m.key = 'drop-' + page.drag;
-			m.title = [page.drag === 'ok' ? COPY.drop : COPY.dropBlocked];
+			m.title = [page.drag === 'ok' ? (page.bios ? DISC_COPY.drop : COPY.drop) : (page.bios ? DISC_COPY.blockedAny : COPY.dropBlocked)];
 			m.error = '';
 			return m;
 		}
@@ -2265,18 +4180,18 @@
 			break;
 		}
 		case 'ready':
-			m.title = [biosTitle(b.name)];
-			m.body = biosLine(b);
+			m.title = [biosTitle(b ? b.name : page.urlBiosName)];
+			m.body = b ? biosLine(b) : fetchingBiosLine();
 			m.meta = true;
 			m.primary = bootPrimary(COPY.boot, 'play');
 			m.alt = true;
-			if (!m.error && b.saveFailed)
+			if (!m.error && b && b.saveFailed)
 				m.error = COPY.saveFailed;
 			break;
 		case 'queued': {
 			const pct = Math.round(loadFraction() * 100);
 			m.title = [COPY.queued, page.runtimeRequested ? ' · ' : '', page.runtimeRequested ? { num: `${pct}%` } : ''];
-			m.body = b ? biosLine(b) : [{ name: page.urlBiosName || '' }, { sep: 1 }, COPY.stored.url];
+			m.body = b ? biosLine(b) : fetchingBiosLine();
 			m.meta = true;
 			m.primary = { label: COPY.boot, icon: 'play', cap: false, action: boot };
 			m.aside = COPY.queuedCancel;
@@ -2315,6 +4230,7 @@
 		default:
 			break;
 		}
+		applyDiscToSlate(state, m);
 		return m;
 	}
 
@@ -2374,7 +4290,11 @@
 		els.slateAlt.hidden = !m.alt;
 		els.slateOpenLog.hidden = !m.openLog;
 		els.slateCopy.hidden = !m.copy;
-		els.slateActions.hidden = !(p || m.aside || m.alt || m.openLog || m.copy);
+		discEls.slateDisc.hidden = !m.disc;
+		if (m.disc)
+			setText(discEls.slateDisc, m.disc);
+		discEls.slateRemove.hidden = !m.remove;
+		els.slateActions.hidden = !(p || m.aside || m.alt || m.openLog || m.copy || m.disc || m.remove);
 
 		setText(els.slateError, m.error || '');
 		els.slateError.hidden = !m.error;
@@ -2472,6 +4392,9 @@
 		renderCapture();
 		renderReadout(state);
 		renderBiosMenu();
+		renderDiscMenu();
+		audioSync(state);
+		renderSound();
 		els.btnFs.hidden = !fullscreenSupported();
 		if (state === 'starting')
 			announceStartingNotice();
@@ -2511,7 +4434,8 @@
 				els.screen.focus({ preventScroll: true });
 			renderCapture();
 			announce(captureActive() ? COPY.announce.running : COPY.announce.runningReleased);
-			maybeFirstBootHint();
+			if (!audioFirstFrameHint())
+				maybeFirstBootHint();
 			break;
 		case 'stopped':
 			page.ranMs = prev === 'running' && page.runStartedAt ? performance.now() - page.runStartedAt : 0;
@@ -2593,7 +4517,7 @@
 		els.biosInput.addEventListener('change', () => {
 			const file = pickBiosCandidate(els.biosInput.files);
 			els.biosInput.value = '';
-			acceptBiosFile(file);
+			acceptFile(file, null); // a disc image picked here goes to the disc
 		});
 
 		els.btnCrisp.addEventListener('click', (e) => {
@@ -2817,7 +4741,7 @@
 			const ok = dragAllowed() && canChangeBios();
 			endDrag();
 			if (ok)
-				acceptBiosFile(pickBiosCandidate(e.dataTransfer.files));
+				acceptDrop(e.dataTransfer);
 		});
 
 		// Log drawer
@@ -2885,6 +4809,8 @@
 
 	function main() {
 		wireUi();
+		wireDiscUi();
+		wireSoundUi();
 		setCrisp(readPref(PREF_CRISP) === '1');
 		page.keepChrome = readPref(PREF_KEEP_CHROME) === '1';
 		els.keepChrome.checked = page.keepChrome;
@@ -2905,6 +4831,8 @@
 		}
 
 		const biosParam = params.get('bios');
+		const discParam = params.get('disc');
+		disc.urlPending = !!discParam; // a queued ?bios= boot waits for the ?disc= check
 		// Touch-only devices: the download waits for a BIOS.
 		if (!touchOnlyQuery.matches || biosParam)
 			ensureRuntime();
@@ -2914,6 +4842,10 @@
 			loadBiosFromUrl(biosParam);
 		else
 			restoreRememberedBios();
+		if (discParam)
+			loadDiscFromUrl(discParam);
+		else
+			loadRememberedDisc();
 	}
 
 	main();

@@ -26,6 +26,35 @@ static u32 intLastBranchTo;
 
 void intEventTest();
 
+#ifdef ARCH_WASM
+// WebAssembly only: browsers cannot run PCSX2's recompilers, so there the interpreter tests events
+// and the BIOS hooks at branch ends the way the recompilers already do. The desktop interpreter keeps
+// testing them as before, as PCSX2's accuracy reference.
+
+// Until the BIOS boots an ELF, the PC is watched for the EELOAD and ELF entry points (see
+// intTestBiosHooks()). They are reached by a jump or an ERET, so the PC is tested after those rather
+// than after every instruction, much like the recompiler tests them at block starts.
+static bool intBiosHooksActive = false;
+static void intTestBiosHooks();
+#endif
+
+// The end of a branch. On WebAssembly, runs the event test only once the next scheduled event is due,
+// like the recompilers' branch test (iBranchTest): anything that needs an earlier test schedules one
+// with cpuSetNextEventDelta() or cpuSetEvent(), as it must for the recompilers. Checked on the BIOS
+// only, needs proper testing with games.
+static __fi void intBranchTest()
+{
+#ifdef ARCH_WASM
+	if (static_cast<s64>(cpuRegs.cycle - cpuRegs.nextEventCycle) >= 0)
+		intEventTest();
+
+	if (intBiosHooksActive)
+		intTestBiosHooks();
+#else
+	intEventTest();
+#endif
+}
+
 void intUpdateCPUCycles()
 {
 	const bool lowcycles = (cpuBlockCycles <= 40);
@@ -271,7 +300,7 @@ static void doBranch( u32 target )
 {
 	_doBranch_shared( target );
 	intUpdateCPUCycles();
-	intEventTest();
+	intBranchTest();
 }
 
 void intDoBranch(u32 target)
@@ -282,13 +311,18 @@ void intDoBranch(u32 target)
 	if( Cpu == &intCpu )
 	{
 		intUpdateCPUCycles();
-		intEventTest();
+		intBranchTest();
 	}
 }
 
 void intSetBranch()
 {
 	branch2 = /*cpuRegs.branch =*/ 1;
+#ifdef ARCH_WASM
+	// ERET, which is how the BIOS enters an ELF.
+	if (intBiosHooksActive)
+		intTestBiosHooks();
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -336,7 +370,7 @@ void BEQ()  // Branch if Rs == Rt
 	if (cpuRegs.GPR.r[_Rs_].SD[0] == cpuRegs.GPR.r[_Rt_].SD[0])
 		doBranch(_BranchTarget_);
 	else
-		intEventTest();
+		intBranchTest();
 }
 
 void BNE()  // Branch if Rs != Rt
@@ -344,7 +378,7 @@ void BNE()  // Branch if Rs != Rt
 	if (cpuRegs.GPR.r[_Rs_].SD[0] != cpuRegs.GPR.r[_Rt_].SD[0])
 		doBranch(_BranchTarget_);
 	else
-		intEventTest();
+		intBranchTest();
 }
 
 /*********************************************************
@@ -417,7 +451,7 @@ void BEQL()    // Branch if Rs == Rt
 	else
 	{
 		cpuRegs.pc +=4;
-		intEventTest();
+		intBranchTest();
 	}
 }
 
@@ -430,7 +464,7 @@ void BNEL()     // Branch if Rs != Rt
 	else
 	{
 		cpuRegs.pc +=4;
-		intEventTest();
+		intBranchTest();
 	}
 }
 
@@ -443,7 +477,7 @@ void BLEZL()    // Branch if Rs <= 0
 	else
 	{
 		cpuRegs.pc +=4;
-		intEventTest();
+		intBranchTest();
 	}
 }
 
@@ -456,7 +490,7 @@ void BGTZL()     // Branch if Rs >  0
 	else
 	{
 		cpuRegs.pc +=4;
-		intEventTest();
+		intBranchTest();
 	}
 }
 
@@ -469,7 +503,7 @@ void BLTZL()     // Branch if Rs <  0
 	else
 	{
 		cpuRegs.pc +=4;
-		intEventTest();
+		intBranchTest();
 	}
 }
 
@@ -482,7 +516,7 @@ void BGEZL()     // Branch if Rs >= 0
 	else
 	{
 		cpuRegs.pc +=4;
-		intEventTest();
+		intBranchTest();
 	}
 }
 
@@ -496,7 +530,7 @@ void BLTZALL()   // Branch if Rs <  0 and link
 	else
 	{
 		cpuRegs.pc +=4;
-		intEventTest();
+		intBranchTest();
 	}
 }
 
@@ -510,7 +544,7 @@ void BGEZALL()   // Branch if Rs >= 0 and link
 	else
 	{
 		cpuRegs.pc +=4;
-		intEventTest();
+		intBranchTest();
 	}
 }
 
@@ -590,6 +624,98 @@ static void intCancelInstruction()
 	fastjmp_jmp(&intJmpBuf, 0);
 }
 
+#ifdef ARCH_WASM
+// The interpreter only tests events at branches. iR5900 also tests them where it splits long blocks
+// (at 4 KB pages), so there straight-line code still advances the counters; here nothing else would.
+// A guest that never branches (a blank BIOS image runs NOPs into a TLB miss, which resets it) would
+// never reach a vsync, and the host could never stop it. Real code never runs this long without a
+// branch, so this only changes such runaway guests.
+static __fi void intTestEventsInStraightLineCode()
+{
+	static constexpr u32 max_block_cycles = 1u << 20; // 3-bit fixed point: 131072 cycles
+	if (cpuBlockCycles >= max_block_cycles)
+	{
+		intUpdateCPUCycles();
+		intEventTest();
+	}
+}
+
+// Avoids reloading these every time the hooks are tested.
+static u32 intElfEntryPoint, intEeloadMain, intEeloadExec;
+
+static void intLoadBiosHooks()
+{
+	intBiosHooksActive = !VMManager::Internal::HasBootedELF();
+	intElfEntryPoint = VMManager::Internal::GetCurrentELFEntryPoint();
+	intEeloadMain = g_eeloadMain;
+	intEeloadExec = g_eeloadExec;
+}
+
+// The same hooks as the desktop intExecute() below, which tests them after every instruction; keep
+// the two in step.
+static void intTestBiosHooks()
+{
+	if (cpuRegs.pc == EELOAD_START)
+	{
+		// The EELOAD _start function is the same across all BIOS versions afaik
+		const u32 mainjump = memRead32(EELOAD_START + 0x9c);
+		if (mainjump >> 26 == 3) // JAL
+			g_eeloadMain = ((EELOAD_START + 0xa0) & 0xf0000000U) | (mainjump << 2 & 0x0fffffffU);
+
+		intEeloadMain = g_eeloadMain;
+	}
+	else if (cpuRegs.pc == intEeloadMain)
+	{
+		eeloadHook();
+		if (VMManager::Internal::IsFastBootInProgress())
+		{
+			// See comments on this code in iR5900.cpp's recRecompile()
+			const u32 typeAexecjump = memRead32(EELOAD_START + 0x470);
+			const u32 typeBexecjump = memRead32(EELOAD_START + 0x5B0);
+			const u32 typeCexecjump = memRead32(EELOAD_START + 0x618);
+			const u32 typeDexecjump = memRead32(EELOAD_START + 0x600);
+			if ((typeBexecjump >> 26 == 3) || (typeCexecjump >> 26 == 3) || (typeDexecjump >> 26 == 3)) // JAL to 0x822B8
+				g_eeloadExec = EELOAD_START + 0x2B8;
+			else if (typeAexecjump >> 26 == 3) // JAL to 0x82170
+				g_eeloadExec = EELOAD_START + 0x170;
+			else
+				Console.WriteLn("intExecute: Could not enable launch arguments for fast boot mode; unidentified BIOS version! Please report this to the PCSX2 developers.");
+
+			intEeloadExec = g_eeloadExec;
+		}
+
+		intElfEntryPoint = VMManager::Internal::GetCurrentELFEntryPoint();
+	}
+	else if (cpuRegs.pc == intEeloadExec)
+	{
+		eeloadHook2();
+	}
+	else if (cpuRegs.pc == intElfEntryPoint)
+	{
+		VMManager::Internal::EntryPointCompilingOnCPUThread();
+		intLoadBiosHooks();
+	}
+}
+
+static void intExecute()
+{
+	// This will come back as zero the first time it runs, or on instruction cancel.
+	// It will come back as nonzero when we exit execution.
+	if (fastjmp_set(&intJmpBuf) != 0)
+	{
+		intBiosHooksActive = false;
+		return;
+	}
+
+	intLoadBiosHooks();
+
+	while (true)
+	{
+		execI();
+		intTestEventsInStraightLineCode();
+	}
+}
+#else
 static void intExecute()
 {
 	// This will come back as zero the first time it runs, or on instruction cancel.
@@ -659,6 +785,7 @@ static void intExecute()
 		}
 	}
 }
+#endif
 
 static void intStep()
 {

@@ -1,0 +1,50 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team -->
+<!-- SPDX-License-Identifier: GPL-3.0+ -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disc worker harness</title>
+<style>
+	:root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #666; --line: #ddd; --fail: #b00020; --pass: #1b6e2a; }
+	@media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #161616; --muted: #aaa; --line: #333; --fail: #ff6b81; --pass: #7bd88f; } }
+	body { margin: 0; padding: 16px; font: 14px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+	h1 { font-size: 18px; margin: 0 0 4px; }
+	p { margin: 4px 0 12px; color: var(--muted); max-width: 70ch; }
+	code, pre, td { font-family: ui-monospace, monospace; font-size: 12px; }
+	.controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 12px 0; }
+	button, select { font: inherit; padding: 4px 10px; }
+	table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+	th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 3px 6px; vertical-align: top; }
+	td:last-child { word-break: break-all; }
+	tr.fail td { color: var(--fail); }
+	tr.pass td:nth-child(6) { color: var(--pass); }
+	pre { max-height: 40vh; overflow: auto; border: 1px solid var(--line); padding: 8px; white-space: pre-wrap; }
+	.wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Disc worker harness</h1>
+<p>Tests <code>pcsx2-wasm/web/disc-worker.js</code> without the emulator: requester workers post reads into a request block in a shared
+WebAssembly.Memory and wait with Atomics, as PCSX2's disc reader thread will. Design: <code>docs/web-port/DISC-DESIGN.md</code>.</p>
+<p>Disc URL: <code id="disc-url"></code><br>Worker: <code id="worker-url"></code></p>
+<div class="controls">
+	<label>Disc file <input id="pick" type="file"></label>
+	<label>Requester <select id="impl"><option value="js">JS</option><option value="wasm">wasm (requester.wasm)</option></select></label>
+	<label>Worker loop <select id="loop"><option value="auto">auto</option><option value="blocking">blocking</option></select></label>
+	<button id="run-core" type="button">Run tests</button>
+	<button id="run-bench" type="button">Run benchmarks</button>
+	<button id="import" type="button">Copy the disc URL into OPFS</button>
+	<button id="remove" type="button">Remove the OPFS copy</button>
+</div>
+<pre id="log" aria-live="polite"></pre>
+<div class="wrap">
+<table id="results">
+	<thead><tr><th>Test</th><th>Source</th><th>Read</th><th>Requester</th><th>Loop</th><th>Result</th><th>Details</th></tr></thead>
+	<tbody></tbody>
+</table>
+</div>
+<script src="harness.js"></script>
+</body>
+</html>

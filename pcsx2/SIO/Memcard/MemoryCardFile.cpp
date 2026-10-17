@@ -313,6 +313,13 @@ void FileMemoryCard::Open()
 			m_file[slot] = FileSystem::OpenSharedCFile(fname.c_str(), "r+b", FileSystem::FileShareMode::DenyWrite);
 		}
 
+#ifdef __EMSCRIPTEN__
+		// The page copies memory cards from the browser's in-memory file system to IndexedDB after
+		// they are written: write through, so a save never waits in the stdio buffer for the next seek.
+		if (m_file[slot])
+			std::setvbuf(m_file[slot], nullptr, _IONBF, 0);
+#endif
+
 		if (!m_file[slot])
 		{
 			Host::ReportErrorAsync(TRANSLATE_SV("MemoryCard", "Memory Card Read Failed"),
@@ -352,7 +359,18 @@ void FileMemoryCard::Close()
 			continue;
 
 		// Store checksum
-		if (!m_ispsx[slot] && FileSystem::FSeek64(m_file[slot], m_chkaddr, SEEK_SET) == 0)
+		bool store_checksum = !m_ispsx[slot];
+#ifdef __EMSCRIPTEN__
+		// Only when it changed: the page copies a card to IndexedDB whenever its file is written, and an
+		// unchanged card should not cost a copy (of up to 8 MB, on the page's thread) at every shutdown.
+		u64 stored_chksum = 0;
+		if (store_checksum && FileSystem::FSeek64(m_file[slot], m_chkaddr, SEEK_SET) == 0 &&
+			std::fread(&stored_chksum, sizeof(stored_chksum), 1, m_file[slot]) == 1)
+		{
+			store_checksum = (stored_chksum != m_chksum[slot]);
+		}
+#endif
+		if (store_checksum && FileSystem::FSeek64(m_file[slot], m_chkaddr, SEEK_SET) == 0)
 			std::fwrite(&m_chksum[slot], sizeof(m_chksum[slot]), 1, m_file[slot]);
 
 		std::fclose(m_file[slot]);

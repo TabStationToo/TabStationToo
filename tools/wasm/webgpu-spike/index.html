@@ -1,0 +1,66 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team -->
+<!-- SPDX-License-Identifier: GPL-3.0+ -->
+<html lang="en">
+<meta charset="utf-8">
+<title>WebGPU spike</title>
+<style>
+	body { margin: 0; background: #fff; }
+	canvas { display: block; width: 320px; height: 240px; margin: 8px; }
+</style>
+<canvas id="canvas" width="320" height="240"></canvas>
+<canvas id="present" width="320" height="240"></canvas>
+<script>
+// index.html?build=jspi|asyncify|none|jspi-sjlj-js&tests=all|present,idle,...&adapter=core|compat
+// #canvas is transferred to a pthread; #present shows ImageBitmaps a pthread posts. This page only
+// reads back what they show.
+const query = new URLSearchParams(location.search);
+const canvas = document.getElementById("canvas");
+const present = document.getElementById("present");
+const presentContext = present.getContext("bitmaprenderer");
+const probe = new OffscreenCanvas(1, 1).getContext("2d", { willReadFrequently: true });
+
+// The frame a canvas holds now, at its centre.
+function sample(c = canvas) {
+	probe.clearRect(0, 0, 1, 1);
+	probe.drawImage(c, c.width / 2, c.height / 2, 1, 1, 0, 0, 1, 1);
+	return [...probe.getImageData(0, 0, 1, 1).data];
+}
+
+let observing = null;
+function observe() {
+	if (!observing) return;
+	const [r, g] = sample(observing.canvas);
+	observing.samples++;
+	if (g >= 195 && g <= 205) observing.frames.add(r);
+	requestAnimationFrame(observe);
+}
+
+function onLine(line) {
+	console.log(line);
+	let m;
+	if ((m = line.match(/^SHOT (\S+)/))) {
+		// The worker's frame reaches the placeholder a little after its task ends.
+		const name = m[1];
+		setTimeout(() => console.log(`[page] 300 ms after ${name}: #canvas rgba(${sample().join(",")}), #present rgba(${sample(present).join(",")})`), 300);
+	} else if ((m = line.match(/^OBSERVE begin (\S+)( present)?/))) {
+		observing = { name: m[1], canvas: m[2] ? present : canvas, samples: 0, frames: new Set() };
+		requestAnimationFrame(observe);
+	} else if ((m = line.match(/^OBSERVE end (\S+)/)) && observing) {
+		console.log(`[page] ${observing.name}: ${observing.frames.size} distinct spike frames seen in ${observing.samples} page frames`);
+		observing = null;
+	}
+}
+
+var Module = {
+	canvas,
+	arguments: [query.get("tests") || "all", query.get("adapter") || "core"],
+	print: onLine,
+	spikePresent: (bitmap) => presentContext.transferFromImageBitmap(bitmap),
+	printErr: (line) => console.warn(line),
+};
+const script = document.createElement("script");
+script.src = `spike-${query.get("build") || "jspi"}.js`;
+document.body.append(script);
+</script>
+</html>

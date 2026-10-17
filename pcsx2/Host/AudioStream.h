@@ -96,6 +96,15 @@ public:
 		const char* driver_name, const char* device_name, bool stretch_enabled, Error* error = nullptr);
 	static std::unique_ptr<AudioStream> CreateNullStream(u32 sample_rate, u32 buffer_ms);
 
+#ifdef __EMSCRIPTEN__
+	/// WebAssembly: an output the frontend supplies (the headless runner's WAV writer; a page's Web Audio stream could
+	/// register the same way), as a subclass that calls ReadFrames(). CreateStream() uses this factory for
+	/// AudioBackend::Frontend. Register it before the VM starts.
+	using FrontendStreamFactory = std::unique_ptr<AudioStream> (*)(u32 sample_rate,
+		const AudioStreamParameters& parameters, bool stretch_enabled, Error* error);
+	static void SetFrontendStreamFactory(FrontendStreamFactory factory);
+#endif
+
 protected:
 	enum ReadChannel : u8
 	{

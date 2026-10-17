@@ -29,6 +29,12 @@ void _vu1ExecLower(VURegs* VU, u32* ptr)
 
 int vu1branch = 0;
 
+// MTVU: the EE thread owns VPU_STAT, FBRST and the INTC, and clears VBS1 when it queues a program, so the VU thread
+// tracks its own run state and reports D/T/E-bit stops through mtvuInterrupts at the program end, like microVU.
+// Needs proper testing.
+bool vu1InterpMTVURunning = false;
+static bool s_mtvu_dt_stop = false;
+
 static void _vu1Exec(VURegs* VU)
 {
 	_VURegsNum lregs;
@@ -44,7 +50,15 @@ static void _vu1Exec(VURegs* VU)
 	}
 	if (ptr[1] & 0x10000000) // D flag
 	{
-		if (VU0.VI[REG_FBRST].UL & 0x400)
+		if (THREAD_VU1_INTERP)
+		{
+			if (vu1Thread.vuFBRST & 0x400)
+			{
+				s_mtvu_dt_stop = true;
+				VU->ebit = 1;
+			}
+		}
+		else if (VU0.VI[REG_FBRST].UL & 0x400)
 		{
 			VU0.VI[REG_VPU_STAT].UL |= 0x200;
 			hwIntcIrq(INTC_VU1);
@@ -53,7 +67,15 @@ static void _vu1Exec(VURegs* VU)
 	}
 	if (ptr[1] & 0x08000000) // T flag
 	{
-		if (VU0.VI[REG_FBRST].UL & 0x800)
+		if (THREAD_VU1_INTERP)
+		{
+			if (vu1Thread.vuFBRST & 0x800)
+			{
+				s_mtvu_dt_stop = true;
+				VU->ebit = 1;
+			}
+		}
+		else if (VU0.VI[REG_FBRST].UL & 0x800)
 		{
 			VU0.VI[REG_VPU_STAT].UL |= 0x400;
 			hwIntcIrq(INTC_VU1);
@@ -191,16 +213,31 @@ static void _vu1Exec(VURegs* VU)
 		{
 			VU->VIBackupCycles = 0;
 			_vuFlushAll(VU);
-			VU0.VI[REG_VPU_STAT].UL &= ~0x100;
-			vif1Regs.stat.VEW = false;
+			if (THREAD_VU1_INTERP)
+			{
+				vu1InterpMTVURunning = false;
+			}
+			else
+			{
+				VU0.VI[REG_VPU_STAT].UL &= ~0x100;
+				vif1Regs.stat.VEW = false;
+			}
 
 			if(VU1.xgkickenable)
 				_vuXGKICKTransfer(0, true);
 			// In instant VU mode, VU1 goes WAY ahead of the CPU, making the XGKick fall way behind
 			// We also have some code to update it in VIF Unpacks too, since in some games (Aggressive Inline) overwrite the XGKick data
 			// VU currently flushes XGKICK on end, so this isn't needed, yet
-			if (INSTANT_VU1)
+			if (INSTANT_VU1 && !THREAD_VU1_INTERP)
 				VU1.xgkicklastcycle = cpuRegs.cycle;
+
+			if (THREAD_VU1_INTERP)
+			{
+				// As microVU: a D/T-bit stop is reported as a T-bit, which raises the VU1 interrupt on the EE thread.
+				vu1Thread.mtvuInterrupts.fetch_or(s_mtvu_dt_stop ? VU_Thread::InterruptFlagVUTBit : VU_Thread::InterruptFlagVUEBit,
+					std::memory_order_release);
+				s_mtvu_dt_stop = false;
+			}
 		}
 	}
 
@@ -263,9 +300,13 @@ void InterpVU1::Execute(u32 cycles)
 	VU1.VI[REG_TPC].UL <<= 3;
 	u64 startcycles = VU1.cycle;
 
+	// MTVU calls this on the VU thread once per queued program (or to continue one).
+	if (THREAD_VU1_INTERP)
+		vu1InterpMTVURunning = true;
+
 	while ((VU1.cycle - startcycles) < cycles)
 	{
-		if (!(VU0.VI[REG_VPU_STAT].UL & 0x100))
+		if (!(THREAD_VU1_INTERP ? vu1InterpMTVURunning : (VU0.VI[REG_VPU_STAT].UL & 0x100)))
 		{
 			if (VU1.branch == 1)
 			{
@@ -277,5 +318,6 @@ void InterpVU1::Execute(u32 cycles)
 		Step();
 	}
 	VU1.VI[REG_TPC].UL >>= 3;
-	VU1.nextBlockCycles = (VU1.cycle - cpuRegs.cycle) + 1;
+	if (!THREAD_VU1_INTERP)
+		VU1.nextBlockCycles = (VU1.cycle - cpuRegs.cycle) + 1;
 }

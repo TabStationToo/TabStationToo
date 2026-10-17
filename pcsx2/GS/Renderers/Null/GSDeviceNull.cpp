@@ -9,6 +9,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 // ----------------------------------------------------------------------------
@@ -66,6 +67,13 @@ namespace
 		const float dv = (sRect.w - sRect.y) * static_cast<float>(sh) / dh;
 		const u8* const src_data = const_cast<GSTextureNull*>(src)->GetData();
 
+		// Unscaled columns at whole-pixel offsets (most blits and presents): with du == 1 and integral u0 and
+		// dRect.x well inside float precision, the mapping below is exact and comes down to x + sx_offset.
+		constexpr float exact_limit = 4194304.0f; // 2^22: x - dRect.x + 0.5f stays exact
+		const bool unscaled_x = (du == 1.0f && u0 == std::floor(u0) && dRect.x == std::floor(dRect.x) &&
+								 std::fabs(u0) < exact_limit && std::fabs(dRect.x) < exact_limit);
+		const int sx_offset = unscaled_x ? static_cast<int>(u0) - static_cast<int>(dRect.x) : 0;
+
 		for (int y = dy0; y < dy1; y++)
 		{
 			if (!keep_row(y))
@@ -74,6 +82,16 @@ namespace
 			const int sy = std::clamp(static_cast<int>(v0 + (static_cast<float>(y) - dRect.y + 0.5f) * dv), 0, sh - 1);
 			const u32* srow = reinterpret_cast<const u32*>(src_data + src->GetOffset(0, sy));
 			u32* drow = dst + static_cast<size_t>(y) * dst_pitch_px;
+			if (unscaled_x)
+			{
+				for (int x = dx0; x < dx1; x++)
+				{
+					const int sx = std::clamp(x + sx_offset, 0, sw - 1);
+					drow[x] = op(drow[x], srow[sx], sy, sx);
+				}
+				continue;
+			}
+
 			for (int x = dx0; x < dx1; x++)
 			{
 				const int sx = std::clamp(static_cast<int>(u0 + (static_cast<float>(x) - dRect.x + 0.5f) * du), 0, sw - 1);

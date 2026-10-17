@@ -23,18 +23,17 @@ The page is one column, top to bottom:
 - **drawer:** Keys or Log
 - **credits:** the footer
 
-There is also a BIOS-menu popover and an About dialog. Before play, the slate holds the single primary action. During play, the transport does.
+There is also a BIOS-menu popover, a Sound popover (§11) and an About dialog. Before play, the slate holds the single primary action. During play, the transport does.
 
 Space reserved for later, with no controls today:
-- disc, memory-card and save-state slots, left of the BIOS menu
-- volume, first on the right
+- memory-card and save-state slots, left of the disc menu (the disc slot is in use, see §10)
 - Settings, as a third drawer
 - a Gamepad tab in Keys
 
 **Flows:**
 - **First run:** the runtime starts downloading on load while the slate asks for a BIOS. Neither waits for the other.
 - **BIOS chosen, or returning user:** the title card appears. It says "This visit only" until IndexedDB confirms the save. Nothing ever boots by itself.
-- **Boot pressed before the download finishes:** the boot is queued (`page.autoBoot`). Pressing again cancels it. `?bios=` starts in this state.
+- **Boot pressed before the download finishes:** the boot is queued (`page.autoBoot`). Pressing again cancels it. `?bios=` starts in this state; cancelled while its file is still downloading, it shows that file's title card (without the size until it arrives).
 - **Starting:** elapsed seconds, then "waiting for the first frame". A reassuring line appears at 10 s and a link to the log at 15 s.
 - **Running:** the lights go down and the frame line and tally turn amber. The controls hide after 2.5 s idle. One hint shows on a browser's first boot.
 - **Released** (by Esc, Tab, window blur or a hidden tab): the frame line and tally go neutral, the controls stay visible, and "Click the screen to play" appears.
@@ -164,7 +163,7 @@ The Latin subsets have no ← → ↗ ▪ ▫ and no face-button shapes, so draw
 **Mark.** A 16×12 ink outline (1.5 px) with a 4×4 amber square inset 2 px at the lower right, sized to the wordmark's cap height. `favicon.svg` is the mark on #121110.
 
 **Icons.** Phosphor Regular (MIT), at 20 px, in `--ink-2` (`--ink` on hover). Pressed toggles add a 2 px `--ink` bar under the icon.
-- Set: play, stop, memory, caret-up, folder-open, trash, checkerboard, keyboard, terminal-window, corners-out, corners-in, copy, x, arrow-clockwise, arrow-up-right, arrow-line-down, and arrow-up/down/left/right.
+- Set: play, stop, memory, caret-up, folder-open, trash, checkerboard, keyboard, terminal-window, corners-out, corners-in, copy, x, arrow-clockwise, arrow-up-right, arrow-line-down, arrow-up/down/left/right, disc, and speaker-high/low/x/slash (§11).
 - The face-button shapes are drawn in-house on Phosphor's 256 grid with a 16-unit stroke.
 - No texture.
 
@@ -192,8 +191,8 @@ The total is about 124 KB.
 - **Readout.** Not a live region. It shows "—" while starting, and hidden text adds the frame size. When the lights are down, only the speed stays, in ink-3. The slow-speed hint adds to it and never replaces it.
 - **Subtitle** (`role="status"`). The newest replaces the last. It stays 4 s (8 s for the first-boot hint) and pauses on hover. It is only for confirmations and hints.
 - **Transport** (`role="group"`).
-  - Left: Stop (while starting or running), then the BIOS menu.
-  - Right: Crisp (`aria-pressed`), Keys and Log (`aria-expanded`), Fullscreen.
+  - Left: Stop (while starting or running), then the disc menu (while a disc is chosen, §10), then the BIOS menu.
+  - Right: Sound (a popover, §11), Crisp (`aria-pressed`), Keys and Log (`aria-expanded`), Fullscreen.
   - Labels show at 1024 px and wider. Narrower than that, buttons are icons only, with a CSS tooltip on hover and `:focus-visible` that includes the shortcut. On `hover: none` devices the labels sit under the icons.
 - **BIOS menu** (popover).
   - The trigger has `aria-expanded` and `aria-controls` and is never disabled. The menu opens upward and focuses its first item.
@@ -233,7 +232,7 @@ With reduced motion, every duration is 0. The controls still hide.
 
 - **Intake:**
   - "Start with your BIOS."
-  - "TabStationToo needs the BIOS from a PS2 you own, usually a 4 MB .bin file. For now it runs the console's own menus; games come later."
+  - "TabStationToo needs the BIOS from a PS2 you own, usually a 4 MB .bin file. Then add a disc image of one of your games, or boot the console's own menus."
   - "Choose BIOS file…", then "or drop it here"
   - "It stays in this browser. Nothing is uploaded."
   - "How to dump your BIOS" (links to https://pcsx2.net/docs/setup/bios/)
@@ -242,7 +241,7 @@ With reduced motion, every duration is 0. The controls still hide.
 - **Drop:** "Drop to use this BIOS." While running: "Stop the PS2 first to change the BIOS."
 - **Rejected file:**
   - "That file is too small to be a PS2 BIOS (12 KB; a BIOS is usually 4 MB)."
-  - "That file is 4.2 GB. A BIOS is 4 to 8 MB, and game discs aren't supported yet."
+  - "That file is 4.2 GB. A BIOS is 4 to 8 MB." (only for files that are not disc images either; disc images go to §10)
   - "Couldn't read that file. Try choosing it again."
   - "Couldn't fetch the BIOS from /dev-bios/x.bin (HTTP 404)."
   - "?bios= only accepts addresses on this server."
@@ -288,7 +287,7 @@ With reduced motion, every duration is 0. The controls still hide.
   - "About TabStationToo."
   - "PCSX2, compiled to WebAssembly, running entirely in this tab."
   - "Use only a BIOS dumped from a console you own. It's kept in this browser (IndexedDB), never sent anywhere, and you can forget it from the BIOS menu."
-  - "Works today: the BIOS menus with a keyboard. Not yet: games, audio, saving, gamepads."
+  - "Works today: the BIOS menus and games from disc images, with sound and a keyboard, and a memory card kept in this browser. Most games run well below full speed for now. Not yet: save states, gamepads."
   - "Built from PCSX2, GPL-3.0-or-later. Source"
   - "PlayStation and PS2 are trademarks of Sony Interactive Entertainment. This project isn't affiliated with or endorsed by Sony."
   - "Type: Archivo and Chivo Mono by Omnibus-Type (OFL 1.1). Icons: Phosphor (MIT)." Each name links to its licence file.
@@ -326,6 +325,7 @@ Delete `Escape` from `KEY_NAMES`. In fullscreen the browser uses Esc to exit; th
 | Enter | Boot | Screen focused, and the state is ready, stopped or failed. |
 | `?` (matched on `e.key`) | Keys drawer | Focus is in the theatre. Skip it if `e.code` is a pad key. On AZERTY, `?` is Shift+KeyM, and that keypress is swallowed. |
 | `` ` `` (Backquote; ² on AZERTY) | Log drawer | Focus is in the theatre, with no modifiers. |
+| M (matched on `e.key`, so the key labelled M on any layout) | Mute or unmute (§11) | Focus is in the theatre or in the Sound menu, with no modifiers. Skip it if `e.code` is a pad key. |
 | Double-click the picture | Fullscreen | Only while running. |
 
 The single-key shortcuts only work while focus is in the theatre (WCAG 2.1.4). There is no pause key, because pause doesn't exist yet (P stays free). There is no Stop key, because there are no save states and a stray press would lose the session.
@@ -353,9 +353,9 @@ Pointer activity, focus entering the controls (they show at once), a page shortc
      div#screen[tabindex=0][role=application] > canvas#canvas, div.hairline[role=progressbar]
      section#slate > h2[tabindex=-1], p.body, pre.excerpt, div.actions, p.error, details.dev, p.fine
    div.sill > div.capture, p#subtitle[role=status], p#readout, span.tally
-   div.transport[role=group] > .t-left(#btn-stop #bios-btn) .t-right(#btn-crisp #btn-keys #btn-log #btn-fs)
-   section#keys-drawer[hidden], section#log-drawer[hidden] > div#log[role=log], div#bios-menu[popover]
- footer.credits, dialog#about, p#announce[role=status], input#bios-input[type=file][hidden]
+   div.transport[role=group] > .t-left(#btn-stop #disc-btn #bios-btn) .t-right(#btn-sound #btn-crisp #btn-keys #btn-log #btn-fs)
+   section#keys-drawer[hidden], section#log-drawer[hidden] > div#log[role=log], div#disc-menu[popover], div#bios-menu[popover], div#sound-menu[popover]
+ footer.credits, dialog#about, p#announce[role=status], input#bios-input[type=file][hidden], input#disc-input[type=file][hidden]
 ```
 
 **CSS.** One file of about 650 lines, in this order: `@font-face`, tokens, base, layout, components, states, media queries.
@@ -403,3 +403,77 @@ Pointer activity, focus entering the controls (they show at once), a page shortc
 - the old tokens: `--ps-*`, the blue `--accent`, the `system-ui` stacks, `--stage-reserve`
 
 In the `index.html` comment, the `style.css` header and the README's Serve section, change "no web fonts" to "same-origin, self-hosted fonts". Update the README's Use section to match the new controls.
+
+## 10. Disc
+
+A disc is the second thing the page asks for, after the BIOS. It is optional: Boot with no disc still opens the console's own menus. Nothing is copied or uploaded; the disc worker reads the user's file in place (`docs/web-port/DISC-DESIGN.md`).
+
+**Picking.**
+- The BIOS title card gets a quiet "Choose a disc…" between Boot and "Use another BIOS…". It opens the File System Access picker where the browser has one (so the disc can be reopened next visit), otherwise `input#disc-input[type=file]`. Accepted: `.iso`, `.bin`, `.img`.
+- Drag and drop anywhere, as for the BIOS. A dropped file is a disc when it holds an ISO 9660 volume at one of the layouts PCSX2 detects (2048, 2336, 2352 or 2448-byte sectors, with or without a Nero header); otherwise the BIOS rules apply. With a BIOS chosen the drop slate reads "Drop to use this disc or BIOS."
+- `?disc=<url>` (same origin only, like `?bios=`) opens a URL served with byte ranges, for development and tests. With `?bios=` too, the boot is queued as usual; if the disc fails, its error stays on the BIOS title card and the queued boot does not run. The value is a URL inside a query, so it is percent-encoded once more (`serve.py --disc` prints ready links).
+- A disc chosen before any BIOS: the intake's fine print adds "<disc file> is chosen. Add a BIOS to boot it." Nothing boots by itself once the BIOS is in.
+- **Reopening after a reload** (Chromium): the file handle is kept in IndexedDB. The BIOS title card shows the fine-print line "Last disc: <name> · Open it again". "Open it again" is a link-style button; one press asks the browser for permission, then opens the disc. Nothing reopens or boots by itself.
+- While the PS2 is starting or running the disc cannot change: picks and drops are refused with "Stop the PS2 first to change the disc." There is no swap or eject while running (PCSX2 can reopen the old disc only if it stays readable, and one worker serves one file).
+
+**Shown.**
+- The **disc title card** replaces the BIOS title card: the game's title (from PCSX2's game database once a boot has reported it, else the file name without its extension and region tags), then `<file> · 3.2 GB · <where>`, where is "Read from your file", "Remembered in this browser" (handle kept) or "Loaded from ?disc=, not saved". Actions: "Boot" (Enter), "Use another disc…", "Remove the disc". Fine print: "With <BIOS title>. Saves go to a memory card kept in this browser." (or "Saves last for this visit only." when IndexedDB is unavailable).
+- **Boot** first reads the start of the disc (milliseconds; at most 5 s for a server that does not answer). If that fails, nothing boots and the slate shows the error below, so a disc that went away never leaves the boot hanging in "Starting the PS2…".
+- **Starting:** "Starting the PS2…" / `<disc file> · 4 s`. **Stopped:** `<game title> · ran 04:12`. **Failed:** "PCSX2 couldn't boot <disc file>. The end of the log:".
+- **Transport:** a disc menu button (`#disc-btn`, icon `disc`, the game's title, ellipsised at 16rem; 9rem under 640 px) sits left of the BIOS menu and appears only while a disc is chosen. Its popover (`#disc-menu`, like the BIOS menu) shows the file name and where it comes from, then "Choose another disc…" and "Remove the disc". While the PS2 runs, the items are `aria-disabled` and described by "Stop the PS2 to change the disc." The button's accessible name is "Disc: <title>".
+- While a game runs the document title is `<game title> · TabStationToo`.
+
+**Removed.** "Remove the disc" (title card or disc menu) forgets the disc and its remembered handle; the BIOS title card comes back and focus goes to Boot. The subtitle confirms: "Disc removed. Boot opens the console's menus."
+
+**Errors** (the slate's coral line; while running, the slate is hidden, so a disc failure shows as a subtitle that stays 8 s, and again on the slate after Stop):
+- "That file isn't a disc image TabStationToo can read. Use an .iso, .bin or .img of a PS2 disc."
+- "Compressed images (.chd, .cso, .zso, .gz) and block dumps aren't supported yet. Use an .iso."
+- "Couldn't read the disc file. It may have been moved, changed or deleted; choose it again."
+- "The browser didn't allow reading <name>. Choose it again."
+- "Couldn't open the disc at /dev-disc/x.iso (HTTP 404)." (or "(network error)", "(no answer in time)", "(no byte ranges)", "(the disc changed)") · "?disc= only accepts addresses on this server." These are also the slate's line after Stop when a `?disc=` disc failed while running.
+- While running, from a file: "The disc can't be read any more. Stop, then choose the file again." From `?disc=`: "The disc server stopped answering, so the game can't read its disc." (no answer, or no connection) or "The game can't read its disc from the server any more." (anything else). A disc reader that had to be restarted and could not take the disc over counts as a read failure.
+- When reads work again during the same run (the server answers again): the subtitle "The disc can be read again. If the game doesn't go on, stop it and boot again." (a game that already got a read error may not retry).
+
+**Memory card.** Slot 1 is a memory card file kept in IndexedDB: copied there 1.5 s after the game stops writing to it, at once when the PS2 stops (only if the card changed), and when the page is hidden. From the first write until that copy is done, closing or reloading the page brings up the browser's own "Leave site?" question, because the copy cannot finish during an unload. There is no memory-card control yet. If IndexedDB fails, one subtitle says "Couldn't keep the memory card in this browser. Saves last for this visit."
+- One tab keeps the card: the first TabStationToo tab open in the browser. A second tab loads the saved card but never writes it back, so it cannot overwrite the first tab's saves; its fine print reads "Saves last for this visit only: TabStationToo is open in another tab." Reloading it once the first tab is closed makes it the one that keeps the card.
+
+**Announcer:** "Disc ready." · "Disc removed."
+
+## 11. Audio
+
+The PS2's sound plays in the page (`docs/web-port/AUDIO-DESIGN.md`). There is one control, **Sound**, in the slot §2 kept for volume: first on the right of the transport, before Crisp. Volume and mute are the page's own; they never change what the PS2 mixes.
+
+**Sound button** (`#btn-sound`, `.t-btn`, `popovertarget="sound-menu"`, `aria-controls`, `aria-expanded`). It is never disabled.
+- Icon, Phosphor Regular: `speaker-high` at 50% or more, `speaker-low` below 50%, `speaker-x` when muted or at 0%, `speaker-slash` while the browser holds the sound or when the browser can't play it.
+- Label "Sound". Its accessible name (`aria-label`, which starts with the visible label) adds the state: "Sound, 80 percent", "Sound, muted", "Sound, waiting for a key or click", "Sound, unavailable". It carries `aria-keyshortcuts="M"`.
+- Tooltip (icons-only widths): "Sound" with the key cap M.
+- The pressed bar shows while the menu is open, like Keys and Log.
+
+**Sound menu** (`#sound-menu`, popover, `role="group"`, `aria-label="Sound"`), styled like the BIOS menu. It opens upward, right-aligned to its trigger, and focuses its first control. It closes on Esc, a click outside, or when Tab takes focus out of it, and focus goes back to the button.
+- **Volume:** `input[type=range]`, 0 to 100 in steps of 5, labelled "Volume". The value sits to its right in Chivo Mono ("80%") and is `aria-valuetext` "80 percent". Arrows step 5, Page Up/Down 10, Home/End go to the ends. The track is a 2 px `--line-2` line, filled in `--ink` up to the thumb; the thumb is a 12 px `--ink` square with a 3 px radius (amber stays for input capture). Hit area 40 px tall, 44 px on coarse pointers.
+- **Mute:** a menu item with `aria-pressed`, icon `speaker-x`, "Mute", and an 11 px mono key cap "M" (hidden on touch-only devices). Pressed, it gets the 2 px ink bar under its icon, as pressed toggles do in the transport.
+- **Fine print**, only when it applies, in `.menu-reason` style: "The browser holds the sound until you press a key or click." or "This browser can't play the emulator's sound."
+- Moving the slider while muted unmutes. Changes apply at once and are saved on `change`.
+
+**Shortcut M** mutes or unmutes (§8). The subtitle says "Sound off." or "Sound on." (it is the live region; nothing else is announced).
+
+**Starting sound.** Browsers start sound only after a key press or click on the page.
+- Boot (the button, Enter on the screen, or a queued boot's press) makes the AudioContext inside that gesture, so sound starts with the first frames.
+- `?bios=` boots without a gesture. The PS2 runs silently until the first key press or click anywhere on the page, which turns the sound on and still does what it was meant to do (a key still reaches the PS2). With the first frame, the subtitle says "Press a key or click to turn the sound on." (instead of the first-boot hint, which then waits for the next boot), and the Sound button shows `speaker-slash`.
+- If the browser interrupts or suspends the sound later, the button and the menu show the same state, one attempt to resume is made at once, and the next key press or click resumes it.
+- If the browser has no Web Audio worklets, or the worklet fails to start, the button shows `speaker-slash` ("Sound, unavailable"), the menu's fine print says so, and with the first frame the subtitle says "This browser can't play the emulator's sound." once per visit. The PS2 runs on.
+
+**Running, stopping, hidden tab.**
+- Stop (and failed or fatal) fades the sound out over 30 ms and then suspends it, so a stopped page costs no audio work. Boot again resumes it.
+- A hidden tab keeps playing. The browser shows its own speaker on the tab, and the tab can be muted there.
+- Slow scenes play stretched: continuous, at the same pitch, and slowed down with the picture.
+
+**Remembered per browser** (`localStorage`, failing quietly like `pcsx2web.crisp`): `pcsx2web.volume` (`"0"` to `"100"`, default 100) and `pcsx2web.muted` (`"1"` or `"0"`, default `"0"`). The gain is (volume / 100)², ramped over about 15 ms so changes never click.
+
+**Test switches** (no controls): `?mute=1` forces the output gain to 0 for the visit without touching the stored values; `?audio=null` runs the PS2 with no sound at all (PCSX2's Null backend), for cost comparisons; `?audiotap=SECONDS` records what the worklet plays, before the gain, for `window.PCSX2WebAudio` (at most that many seconds); `?audiorate=HZ` makes the AudioContext at another rate than 48 kHz, so the emulator's resampling (PS1 mode) can be tested.
+
+**Motion and accessibility.** Nothing animates beyond the popover rules. The slider and Mute work by keyboard, with visible focus. In forced-colors mode the slider uses `ButtonText` for the track and thumb and `Highlight` for the filled part and focus.
+
+**Microcopy:** "Sound" · "Volume" · "Mute" · "80%" · "Sound off." · "Sound on." · "Press a key or click to turn the sound on." · "The browser holds the sound until you press a key or click." · "This browser can't play the emulator's sound." · accessible names "Sound, 80 percent", "Sound, muted", "Sound, waiting for a key or click", "Sound, unavailable".
+
+**Phone (under 640 px).** Sound leads the tools row: Sound, Crisp, Keys, Log, Fullscreen. The menu keeps its 296 px (it fits in 358 px) and stays right-aligned to the button inside the gutters.

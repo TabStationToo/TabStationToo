@@ -14,6 +14,9 @@ enum class AudioBackend : u8
 	Null,
 	Cubeb,
 	SDL,
+#ifdef __EMSCRIPTEN__
+	Frontend, // WebAssembly: the stream from the factory the frontend registered (AudioStream::SetFrontendStreamFactory).
+#endif
 	Count
 };
 

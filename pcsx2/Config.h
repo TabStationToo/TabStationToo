@@ -1500,6 +1500,10 @@ namespace EmuFolders
 #ifdef _M_X86 // TODO: Remove me once EE/VU/IOP recs are added.
 #define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
 #define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
+#elif defined(ARCH_WASM)
+// No VU1 recompiler: MTVU runs the VU1 interpreter on the VU thread.
+#define THREAD_VU1 (EmuConfig.Speedhacks.vuThread)
+#define REC_VU1 false
 #else
 #define THREAD_VU1 false
 #define REC_VU1 false

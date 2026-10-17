@@ -14,4 +14,6 @@ protected:
 	void VSync(u32 field, bool registers_written, bool idle_frame) override;
 	void Draw() override;
 	GSTexture* GetOutput(int i, float& scale, int& y_offset) override;
+	// GSState's default aborts ("Not implemented"); VertexKick() calls this for AA1 triangles and sprites.
+	bool IsCoverageAlphaSupported() override { return false; }
 };

@@ -839,6 +839,11 @@ p.fine {
   height: 16px;
 }
 
+/* The disc menu button (UI-SPEC §10) carries the game's title, which runs longer than a BIOS name. */
+.disc-btn .bios-btn-name {
+  max-width: 16rem;
+}
+
 /* Icon-only buttons: the tooltip hangs below the button, over the credits or the drawer's top
    edge, so the sill's text stays readable. A bridge keeps it hovered on the way to it (WCAG
    1.4.13), and Esc hides it (app.js, .tip-off). */
@@ -1314,6 +1319,139 @@ p.fine {
   color: var(--coral);
 }
 
+/* ---------------------------------------------------------------- components: Sound menu (UI-SPEC §11) */
+
+.sound-volume {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 4ch;
+  align-items: center;
+  column-gap: 12px;
+  padding: 0 16px 4px;
+}
+
+.sound-label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 480;
+  color: var(--ink-2);
+}
+
+.sound-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 450;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* A 2 px line filled in ink up to a 12 px ink square; --fill is set by app.js. Amber stays for capture. */
+.sound-range {
+  --fill: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: var(--hit);
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.sound-range::-webkit-slider-runnable-track {
+  height: 2px;
+  background: linear-gradient(to right, var(--ink) var(--fill), var(--line-2) var(--fill));
+}
+
+.sound-range::-moz-range-track {
+  height: 2px;
+  background: var(--line-2);
+}
+
+.sound-range::-moz-range-progress {
+  height: 2px;
+  background: var(--ink);
+}
+
+.sound-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--ink);
+}
+
+.sound-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--ink);
+}
+
+/* Keyboard focus: the ring goes around the thumb, what the arrows move. */
+.sound-range:focus-visible {
+  outline: none;
+}
+
+.sound-range:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.sound-range:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.menu-item .cap-key {
+  margin-left: auto;
+  min-width: 20px;
+  padding: 1px 4px;
+  text-align: center;
+  background: var(--house);
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* A pressed toggle, as in the transport: a 2 px ink bar under the icon. */
+.sound-menu .menu-item {
+  position: relative;
+}
+
+.menu-item[aria-pressed="true"] .icon {
+  color: var(--ink);
+}
+
+.menu-item[aria-pressed="true"]::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  bottom: 5px;
+  width: 20px;
+  height: 2px;
+  background: var(--ink);
+}
+
+.sound-menu .menu-reason {
+  padding-left: 16px;
+}
+
+/* Touch-only devices have no M key to show. */
+@media (pointer: coarse) and (hover: none) {
+  .menu-item .cap-key {
+    display: none;
+  }
+}
+
 /* ---------------------------------------------------------------- components: credits, About */
 
 .credits > p {
@@ -1501,8 +1639,9 @@ body[data-subtitle="on"] .subtitle {
 body[data-runtime="deferred"] .hairline,
 body:not([data-state="starting"]):not([data-state="running"]) #btn-stop,
 body[data-bios="none"] #bios-btn,
-body[data-state="dead"] :is(#bios-btn, #btn-crisp, #btn-keys, #btn-fs),
-body[data-state="unsupported"] :is(#bios-btn, #btn-crisp, #btn-keys, #btn-fs) {
+body[data-disc="none"] #disc-btn,
+body[data-state="dead"] :is(#bios-btn, #disc-btn, #btn-crisp, #btn-keys, #btn-fs),
+body[data-state="unsupported"] :is(#bios-btn, #disc-btn, #btn-crisp, #btn-keys, #btn-fs) {
   display: none;
 }
 
@@ -1868,6 +2007,10 @@ body[data-chrome="hidden"] .theatre:fullscreen .sill {
     display: none !important;
   }
 
+  .disc-btn .bios-btn-name {
+    max-width: 9rem;
+  }
+
   .t-left .t-btn[aria-pressed="true"]::before,
   .t-left .t-btn[aria-expanded="true"]::before {
     left: 10px;
@@ -2001,5 +2144,47 @@ body[data-chrome="hidden"] .theatre:fullscreen .sill {
   .menu-item[aria-disabled="true"],
   .menu-item[aria-disabled="true"] .icon {
     color: GrayText;
+  }
+
+  .sound-range {
+    forced-color-adjust: none;
+  }
+
+  .sound-range::-webkit-slider-runnable-track {
+    background: linear-gradient(to right, Highlight var(--fill), ButtonText var(--fill));
+  }
+
+  .sound-range::-moz-range-track {
+    background: ButtonText;
+  }
+
+  .sound-range::-moz-range-progress {
+    background: Highlight;
+  }
+
+  .sound-range::-webkit-slider-thumb {
+    background: ButtonText;
+  }
+
+  .sound-range::-moz-range-thumb {
+    background: ButtonText;
+  }
+
+  .sound-range:focus-visible::-webkit-slider-thumb {
+    outline-color: Highlight;
+  }
+
+  .sound-range:focus-visible::-moz-range-thumb {
+    outline-color: Highlight;
+  }
+
+  .menu-item[aria-pressed="true"]::before {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+
+  /* Icons are SVG fills in --ink-2 or --ink, which forced colors leave alone. */
+  .menu-item:not([aria-disabled="true"]) .icon {
+    color: ButtonText;
   }
 }

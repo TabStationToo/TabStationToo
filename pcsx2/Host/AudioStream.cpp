@@ -104,6 +104,15 @@ std::vector<AudioStream::DeviceInfo> AudioStream::GetOutputDevices(AudioBackend 
 	return ret;
 }
 
+#ifdef __EMSCRIPTEN__
+static AudioStream::FrontendStreamFactory s_frontend_stream_factory = nullptr;
+
+void AudioStream::SetFrontendStreamFactory(FrontendStreamFactory factory)
+{
+	s_frontend_stream_factory = factory;
+}
+#endif
+
 std::unique_ptr<AudioStream> AudioStream::CreateStream(AudioBackend backend, u32 sample_rate, const AudioStreamParameters& parameters,
 	const char* driver_name, const char* device_name, bool stretch_enabled, Error* error)
 {
@@ -121,6 +130,16 @@ std::unique_ptr<AudioStream> AudioStream::CreateStream(AudioBackend backend, u32
 
 		case AudioBackend::Null:
 			return CreateNullStream(sample_rate, parameters.buffer_ms);
+
+#ifdef __EMSCRIPTEN__
+		case AudioBackend::Frontend:
+			if (!s_frontend_stream_factory)
+			{
+				Error::SetStringView(error, "This frontend has no audio output.");
+				return nullptr;
+			}
+			return s_frontend_stream_factory(sample_rate, parameters, stretch_enabled, error);
+#endif
 
 		default:
 			Error::SetStringView(error, "Unknown audio backend.");
@@ -149,12 +168,22 @@ static constexpr const std::array s_backend_names = {
 	"Null",
 	"Cubeb",
 	"SDL",
+#ifdef __EMSCRIPTEN__
+	"Frontend",
+#endif
 };
 static constexpr const std::array s_backend_display_names = {
 	TRANSLATE_NOOP("AudioStream", "Null (No Output)"),
 	TRANSLATE_NOOP("AudioStream", "Cubeb"),
 	TRANSLATE_NOOP("AudioStream", "SDL"),
+#ifdef __EMSCRIPTEN__
+	TRANSLATE_NOOP("AudioStream", "Frontend"),
+#endif
 };
+#ifdef __EMSCRIPTEN__
+static_assert(s_backend_names.size() == static_cast<size_t>(AudioBackend::Count) &&
+			  s_backend_display_names.size() == static_cast<size_t>(AudioBackend::Count));
+#endif
 
 std::optional<AudioBackend> AudioStream::ParseBackendName(const char* str)
 {

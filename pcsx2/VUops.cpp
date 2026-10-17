@@ -1137,7 +1137,15 @@ __fi u32* GET_VU_MEM(VURegs* VU, u32 addr) // non-static, also used by sVU for n
 	if (VU == &vuRegs[1])
 		return (u32*)(vuRegs[1].Mem + (addr & 0x3fff));
 	else if (addr & 0x4000)
+	{
+#ifdef ARCH_WASM
+		// With MTVU this interpreter runs VU1 on the VU thread: let it finish before VU0 (micro or macro mode, on the
+		// EE thread) touches VU1's registers, as microVU0 does with waitMTVU.
+		if (THREAD_VU1)
+			vu1Thread.WaitVU();
+#endif
 		return (u32*)((u8*)vuRegs[1].VF + (addr & 0x3ff)); // get VF and VI regs (they're mapped to 0x4xx0 in VU0 mem!)
+	}
 	else
 		return (u32*)(vuRegs[0].Mem + (addr & 0xfff)); // for addr 0x0000 to 0x4000 just wrap around
 }
@@ -1862,19 +1870,21 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 
 		// Would be "nicer" to do the copy until it's all up, however this really screws up PATH3 masking stuff
 		// So lets just do it the other way :)
-		/*if (THREAD_VU1)
+		// Except with MTVU (wasm runs this interpreter on the VU thread): as microVU, only hand complete tags to
+		// ExecuteGSPacketMTVU, which cannot resume an A+D tag split between calls.
+		if (THREAD_VU1_INTERP)
 		{
 			if ((transfersize * 0x10) < VU1.xgkicksizeremaining)
 				gifUnit.gifPath[GIF_PATH_1].CopyGSPacketData(&VU1.Mem[VU1.xgkickaddr], transfersize * 0x10, true);
 			else
 				gifUnit.TransferGSPacketData(GIF_TRANS_XGKICK, &vuRegs[1].Mem[VU1.xgkickaddr], transfersize * 0x10, true);
 		}
-		else*/
-		//{
+		else
+		{
 			gifUnit.TransferGSPacketData(GIF_TRANS_XGKICK, &vuRegs[1].Mem[VU1.xgkickaddr], transfersize * 0x10, true);
-		//}
+		}
 
-		if ((VU0.VI[REG_VPU_STAT].UL & 0x100) && flush)
+		if ((THREAD_VU1_INTERP ? vu1InterpMTVURunning : (VU0.VI[REG_VPU_STAT].UL & 0x100)) && flush)
 			VU1.cycle += transfersize * 2;
 
 		VU1.xgkickcyclecount -= transfersize * 2;
@@ -1889,12 +1899,16 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 		{
 			VUM_LOG("XGKICK transfer finished");
 			VU1.xgkickenable = false;
-			VU0.VI[REG_VPU_STAT].UL &= ~(1 << 12);
-			// Check if VIF is waiting for the GIF to not be busy
-			if (vif1Regs.stat.VGW)
+			// With MTVU this runs on the VU thread: VPU_STAT and VIF1 belong to the EE thread (microVU leaves them too).
+			if (!THREAD_VU1_INTERP)
 			{
-				vif1Regs.stat.VGW = false;
-				CPU_INT(DMAC_VIF1, 8);
+				VU0.VI[REG_VPU_STAT].UL &= ~(1 << 12);
+				// Check if VIF is waiting for the GIF to not be busy
+				if (vif1Regs.stat.VGW)
+				{
+					vif1Regs.stat.VGW = false;
+					CPU_INT(DMAC_VIF1, 8);
+				}
 			}
 		}
 	}
@@ -1923,7 +1937,8 @@ static __ri void _vuXGKICK(VURegs* VU)
 	// XGKick command counts as one cycle for the transfer.
 	// Can be tested with Resident Evil: Outbreak, Kingdom Hearts, CART Fury.
 	VU->xgkickcyclecount = 1;
-	VU0.VI[REG_VPU_STAT].UL |= (1 << 12);
+	if (!THREAD_VU1_INTERP)
+		VU0.VI[REG_VPU_STAT].UL |= (1 << 12);
 	VUM_LOG("XGKICK addr %x", addr);
 }
 

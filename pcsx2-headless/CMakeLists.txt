@@ -2,6 +2,8 @@ add_executable(pcsx2-headless)
 
 target_sources(pcsx2-headless PRIVATE
 	Main.cpp
+	WavOutput.cpp
+	WavOutput.h
 )
 
 target_include_directories(pcsx2-headless PRIVATE

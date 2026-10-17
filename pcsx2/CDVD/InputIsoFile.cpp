@@ -7,6 +7,10 @@
 #include "CDVD/FlatFileReader.h"
 #include "CDVD/GzippedFileReader.h"
 #include "CDVD/IsoFileFormats.h"
+#ifdef __EMSCRIPTEN__
+#include "CDVD/Emscripten/WebDisc.h"
+#include "CDVD/Emscripten/WebDiscFileReader.h"
+#endif
 #include "Config.h"
 #include "Host.h"
 
@@ -40,6 +44,13 @@ static const char* nameFromType(int type)
 static std::unique_ptr<ThreadedFileReader> GetFileReader(const std::string& path)
 {
 	const std::string_view extension = Path::GetExtension(path);
+
+#ifdef __EMSCRIPTEN__
+	// A disc the page reads from the user's file through its disc worker. Flat images only: the page
+	// refuses compressed and blockdump images, whose readers open the file themselves.
+	if (WebDisc::IsDiscPath(path))
+		return std::make_unique<WebDiscFileReader>();
+#endif
 
 	if (StringUtil::compareNoCase(extension, "chd"))
 		return std::make_unique<ChdFileReader>();

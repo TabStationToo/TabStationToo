@@ -4,7 +4,8 @@
 
 TabStationToo runs PlayStation 2 emulation in a browser tab. It is the
 [PCSX2](https://github.com/PCSX2/pcsx2) emulator compiled to WebAssembly, with a page of its own
-around it. You bring the BIOS from your own console; nothing is uploaded anywhere.
+around it. You bring the BIOS from your own console and disc images of your own games; nothing is
+uploaded anywhere.
 
 TabStationToo is built on PCSX2 and would not exist without the PCSX2 team and its contributors,
 who have developed it for more than twenty years. It is an independent project: it is not
@@ -15,11 +16,22 @@ Please do not report TabStationToo problems to PCSX2.
 
 Early and experimental.
 
-- The BIOS boots in the browser: the start-up animation, the console's menus and its settings
-  work, driven from the keyboard.
-- Games do not run yet: there is no disc support, no audio, no memory cards and no save states.
-- Speed: the emulated CPU keeps up, but drawing is done in software. Menus run near full speed;
-  heavy scenes, such as the start-up animation, run at a fraction of it for now.
+- Games boot from disc images (uncompressed `.iso`, `.bin` or `.img`), read straight from your
+  file. One game has been tested so far, Dragon Ball Z: Budokai Tenkaichi 3 (PAL): it runs from
+  its language menu through the title and menus into a battle, driven from the keyboard, and its
+  save on memory card slot 1 is kept in the browser and loaded again after a reload.
+- The BIOS still boots on its own: the start-up animation, the console's menus and its settings.
+- Sound plays: PCSX2's sound chip emulation (SPU2) through a Web Audio worklet, with a Sound control
+  for volume and mute (M). Below full speed the sound is time-stretched, as in PCSX2 on the desktop:
+  continuous and at the right pitch, but slowed down with the picture, so a battle at 10–20 % sounds
+  smeared. Browsers only start sound after a key press or click on the page; pressing Boot counts.
+- Speed: the emulated CPU is the limit, because a browser cannot run PCSX2's faster recompilers
+  (see below). Measured in that game in Chrome on a Ryzen 7 PRO 7840U laptop, with other jobs
+  running: title screen and logos 100 % of full speed, menus 60–100 %, character select 60–95 %,
+  movies 20–70 %, and battles 10–16 % (5–8 of the PS2's 50 frames per second), which is not
+  playable yet. Drawing is not what slows it down.
+- Not there yet: save states, gamepads, compressed disc images (CHD, CSO, GZ), and swapping discs
+  while a game runs.
 - Desktop Chrome and Edge are the targets. Other browsers may work; phones are not supported yet.
 
 ## How it works
@@ -29,8 +41,15 @@ Early and experimental.
   which a browser cannot run), on threads backed by `SharedArrayBuffer`.
 - The PS2's graphics are drawn by PCSX2's software renderer and shown in a `<canvas>`. A WebGPU
   renderer is planned.
+- The PS2's sound is mixed by PCSX2 on the emulated CPU's thread and played by an Emscripten Wasm
+  Audio Worklet, which reads PCSX2's audio stream on the browser's audio thread
+  ([docs/web-port/AUDIO-DESIGN.md](docs/web-port/AUDIO-DESIGN.md)).
 - The page (`pcsx2-wasm/web/`) is plain HTML, CSS and JavaScript with no build step and no
   third-party requests. The BIOS you pick stays in your browser (IndexedDB).
+- A disc image is never copied: a worker reads the parts the game asks for from your file and
+  hands them to the emulator through shared memory
+  ([docs/web-port/DISC-DESIGN.md](docs/web-port/DISC-DESIGN.md)). The memory card is a file the
+  page keeps in IndexedDB.
 
 The porting plan, with the measurements and decisions behind it, is in
 [docs/web-port/PLAN.md](docs/web-port/PLAN.md). The interface design is in
@@ -68,8 +87,10 @@ required headers and listens on localhost only:
 python3 tools/wasm/serve.py
 ```
 
-Open http://127.0.0.1:8080/, choose your BIOS file and press Boot. Click the screen to give it
-the keyboard, and press Esc to take the keyboard back. The Keys panel shows the controls.
+Open http://127.0.0.1:8080/ and choose your BIOS file. Then press **Choose a disc…** (or drop a
+disc image on the page) and press Boot; without a disc, Boot opens the console's own menus. Click
+the screen to give it the keyboard, and press Esc to take the keyboard back. The Keys panel shows
+the controls.
 
 More detail, including the frontend's API and testing options, is in
 [pcsx2-wasm/README.md](pcsx2-wasm/README.md).
@@ -78,9 +99,9 @@ More detail, including the frontend's API and testing options, is in
 
 A PS2 BIOS is copyrighted software. TabStationToo does not include one and never downloads one:
 dump it from a console you own (see PCSX2's
-[BIOS dumping guide](https://pcsx2.net/docs/setup/bios/)). The same applies to games once disc
-support exists. Please do not share BIOS files or game images in issues or anywhere else in this
-repository.
+[BIOS dumping guide](https://pcsx2.net/docs/setup/bios/)). The same applies to games: use disc
+images you made from discs you own. Please do not share BIOS files or game images in issues or
+anywhere else in this repository.
 
 ## Where things are
 
@@ -88,7 +109,7 @@ repository.
 |---|---|
 | `pcsx2-wasm/` | The browser frontend: `Main.cpp` (the emulator's entry point and the API the page uses) and `web/` (the page) |
 | `pcsx2-headless/` | A windowless runner for Node.js, used to test and benchmark without a browser |
-| `common/Emscripten/`, `pcsx2/wasm/` | WebAssembly platform code for PCSX2's core |
+| `common/Emscripten/`, `pcsx2/wasm/`, `pcsx2/CDVD/Emscripten/` | WebAssembly platform code for PCSX2's core (`CDVD/Emscripten/` reads discs through the page's disc worker) |
 | `tools/wasm/` | Dependency build script and the dev server |
 | `docs/web-port/` | Porting plan and interface design |
 | `docs/upstream/` | PCSX2's own guidance kept for reference (its agent guidelines) |

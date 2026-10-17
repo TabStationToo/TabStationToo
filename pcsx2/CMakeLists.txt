@@ -743,8 +743,16 @@ else()
 endif()
 
 if(EMSCRIPTEN)
-	# No disc drives or packet capture in the browser.
-	list(APPEND pcsx2CDVDSources CDVD/Emscripten/IOCtlSrc.cpp)
+	# No disc drives or packet capture in the browser. Disc images come from the page's disc worker.
+	list(APPEND pcsx2CDVDSources
+		CDVD/Emscripten/IOCtlSrc.cpp
+		CDVD/Emscripten/WebDisc.cpp
+		CDVD/Emscripten/WebDiscFileReader.cpp
+	)
+	list(APPEND pcsx2CDVDHeaders
+		CDVD/Emscripten/WebDisc.h
+		CDVD/Emscripten/WebDiscFileReader.h
+	)
 	list(APPEND pcsx2DEV9Sources DEV9/Emscripten/pcap_stub.cpp)
 endif()
 

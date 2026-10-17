@@ -116,6 +116,7 @@ oprofile_data/
 /deps-build-wasm
 /build-wasm*
 /pcsx2-wasm/assets/node_modules
+__pycache__/
 /gammaray-build
 /gammaray
 /ipch

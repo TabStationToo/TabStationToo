@@ -236,6 +236,28 @@ static __fi void execI()
 	psxBSC[psxRegs.code >> 26]();
 }
 
+#ifdef ARCH_WASM
+// WebAssembly only: browsers cannot run PCSX2's recompilers, so there the interpreter skips idle
+// loops the way the IOP recompiler already does. The desktop interpreter keeps running them, as
+// PCSX2's accuracy reference.
+
+// True when the branch that just ran (its delay slot too) loops back to tar over nops only.
+static __fi bool psxIsIdleLoop(u32 tar)
+{
+	const u32 branch_pc = psxRegs.pc - 8;
+	if (tar > branch_pc)
+		return false;
+
+	for (u32 pc = tar; pc < branch_pc; pc += 4)
+	{
+		if (iopMemRead32(pc) != 0)
+			return false;
+	}
+
+	return true;
+}
+#endif
+
 static void doBranch(s32 tar) {
 	if (tar == 0x0)
 		DevCon.Warning("[R3000 Interpreter] Warning: Branch to 0x0!");
@@ -259,6 +281,20 @@ static void doBranch(s32 tar) {
 	execI();
 	PSXCPU_LOG( "\n" );
 	iopIsDelaySlot = false;
+#ifdef ARCH_WASM
+	// Idle loop: a branch back over nothing but nops, with a nop in its delay slot, waits for an interrupt.
+	// Skip to the next IOP event or to the end of the timeslice, like the IOP recompiler's wait loop
+	// (s_nBlockFF in iPsxBranchTest). intExecuteBlock() charges the skipped cycles to the timeslice.
+	// Checked on the BIOS only, needs proper testing with games.
+	if (EmuConfig.Speedhacks.WaitLoop && psxRegs.code == 0 && psxRegs.iopCycleEE > 0 && psxIsIdleLoop(tar))
+	{
+		u64 target = psxRegs.cycle + ((static_cast<u32>(psxRegs.iopCycleEE) + 7) >> 3);
+		if (static_cast<s64>(target - psxRegs.iopNextEventCycle) > 0)
+			target = psxRegs.iopNextEventCycle;
+		if (static_cast<s64>(target - psxRegs.cycle) > 0)
+			psxRegs.cycle = target;
+	}
+#endif
 	psxRegs.pc = branchPC;
 
 	iopEventTest();
@@ -288,7 +324,20 @@ static s32 intExecuteBlock( s32 eeCycles )
 
 		branch2 = 0;
 		while (!branch2)
+		{
 			execI();
+#ifdef ARCH_WASM
+			// This loop only ends at a branch, so a guest that never branches (a blank BIOS image runs
+			// NOPs through the whole address space) would never return to the EE, which could then never
+			// reach a vsync or stop. Real code never runs this long without a branch. See also
+			// intTestEventsInStraightLineCode() in the EE interpreter.
+			if (!branch2 && (psxRegs.cycle - lastIOPCycle) >= 0x10000)
+			{
+				iopEventTest();
+				break;
+			}
+#endif
+		}
 
 		
 		if ((psxHu32(HW_ICFG) & (1 << 3)))

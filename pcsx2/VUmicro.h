@@ -180,6 +180,14 @@ extern void vu1Finish(bool add_cycles);
 extern void vu1ResetRegs();
 extern void vu1ExecMicro(u32 addr);
 extern void vu1Exec(VURegs* VU);
+// MTVU with the VU1 interpreter: whether the VU thread is running a program (VPU_STAT stays with the EE thread).
+extern bool vu1InterpMTVURunning;
+// Only wasm (no VU1 recompiler) runs the VU1 interpreter on the VU thread; desktop keeps upstream's interpreter paths.
+#ifdef ARCH_WASM
+#define THREAD_VU1_INTERP THREAD_VU1
+#else
+#define THREAD_VU1_INTERP false
+#endif
 extern void MTVUInterrupt();
 
 #ifdef VUM_LOG

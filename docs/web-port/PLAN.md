@@ -6,6 +6,17 @@
 > interlace (incl. FastMAD) and present paths now follow the GPU shaders. M2's
 > "first pixels" exit is met in the browser; the remaining items below still apply.
 
+> **Status update (2026-10-16): speed.** The emulated CPU is the limit, not drawing: the
+> BIOS intro is EE-interpreter-bound. Under Node on the 7840U, 450 frames of the
+> SCPH-39001 intro (7.5 s in real time) took 35.5 s with `-renderer null` and about 37 s
+> with `-renderer sw`. Three interpreter changes taken from the recompilers, wasm-only
+> (`ARCH_WASM`) and checked on the BIOS only (the EE event test runs only once an event is
+> due, the IOP skips idle loops, the BIOS boot hooks are tested at branch ends), bring that
+> to about 25 s (null) and 27 s (SW): the intro now runs at about 25-30 % of full speed
+> (it was about 20 %), the menus near full speed. The SW renderer adds under 10 % to the
+> intro's time, so WebGPU (M4) matters for games, not for the BIOS; full speed needs a
+> wasm JIT (M5).
+
 # PCSX2 in the browser: porting plan (Emscripten → WebAssembly, WebGPU)
 
 *Lead-architect synthesis for the downstream fork `pcsx2-web`. Upstream base: commit 685637d30 (2026-10-14). Written 2026-10-15, revised after a critic pass.*
@@ -21,7 +32,7 @@ With these, a Release wasm32 build (`build-wasm/bin/pcsx2-headless.wasm`, 9.9 MB
 Measured in `build-wasm/boot-rel.log` (Release, SW renderer, default 2 SW threads, Ryzen 7 PRO 7840U, limiter target speed 1, `:122`):
 - **BIOS logo intro (a light 3D load, frames 6–449):** median 20.1 % of real time over 63 samples, interquartile range 19.8–20.4 %, full range 14.7–60.6 %.
 - **Static OSDSYS menu (frames 489–579):** 100 %. That is the frame limiter's ceiling, so the real headroom is unknown.
-- The run does not separate CPU cost from SW-renderer cost. `boot-70004.log` ends at 71–75 %.
+- The run does not separate CPU cost from SW-renderer cost. `boot-70004.log` ends at 71–75 %. A later split (2026-10-16, status update at the top) shows the EE interpreter is the limit: with `-renderer null` the intro takes under 10 % less time.
 
 **A browser frontend is in progress (wasm\*, another session, uncommitted):**
 - `pcsx2-wasm/` holds `Main.cpp` (831 lines), `CMakeLists.txt` and `web/{index.html,app.js,style.css}`.
@@ -52,8 +63,8 @@ I have not verified whether it boots in a browser. **Status:** M0 is done. M1 is
 
 | Configuration | Desktop (recent laptop/desktop, Chrome) | Mobile |
 |---|---|---|
-| Interpreters, SW renderer (today) | **Measured** under Node on a 7840U: light-3D BIOS intro about 20 %; idle menu capped at 100 % by the limiter. CPU vs SW-GS cost not yet split; rerun with the limiter off and with `-renderer null` (already accepted, `pcsx2-headless/Main.cpp:146-152`). 3D games: roughly 5–20 % (estimate) until the M1 profile exists. Upstream's only number is about 8 fps native on a 3.9 GHz Haswell (`pcsx2/Interpreter.cpp:157-160`), and wasm adds roughly 1.5–2× (Jangda 2019). | Not usable. |
-| Interpreters plus cheap wins (decode caches, event-test gating, native SIMD conversions) | Perhaps 1.5–2× the above, so about 30–40 % on the measured intro (estimate). **Hypothesis to test in M1/M2:** 2D and FMV-heavy titles may reach full speed. Test it with one named 2D title and one IPU/FMV title. MTVU is not a cheap win (see M3 task 10). | Light titles only, if any. |
+| Interpreters, SW renderer (today) | **Measured** under Node on a 7840U: light-3D BIOS intro about 20 %; idle menu capped at 100 % by the limiter. **Measured** split (2026-10-16): EE-interpreter-bound; 450 intro frames (7.5 s in real time) took 35.5 s with `-renderer null` and about 37 s with `-renderer sw`. 3D games: roughly 5–20 % (estimate) until the M1 profile exists. Upstream's only number is about 8 fps native on a 3.9 GHz Haswell (`pcsx2/Interpreter.cpp:157-160`), and wasm adds roughly 1.5–2× (Jangda 2019). | Not usable. |
+| Interpreters plus cheap wins (decode caches, event-test gating, native SIMD conversions) | Perhaps 1.5–2× the above, so about 30–40 % on the measured intro (estimate). **Measured** for the first ones (event-test gating, an IOP idle-loop skip, BIOS hooks at branch ends): about 1.3–1.4×, so 25–30 % on the intro (about 25 s null, 27 s SW for the 450 frames). **Hypothesis to test in M1/M2:** 2D and FMV-heavy titles may reach full speed. Test it with one named 2D title and one IPU/FMV title. MTVU is not a cheap win (see M3 task 10). | Light titles only, if any. |
 | Wasm JIT for VU1 + EE, WebGPU HW renderer | Full speed on light and medium titles needs roughly 5× over today. Plausible but unproven (estimate; no prior art for an LLE PCSX2 JIT in wasm). Heavy titles are likely below full speed. | Light titles at best. Every iOS browser is WebKit: no dual-source blending, and JSPI only from Safari 27. |
 
 *Not comparable:* pcsx2_web reports 0.32× in Chrome and 0.63× in gameplay, but it ran with EECycleRate=-2, EECycleSkip=2, vu1Instant, WaitLoop, IntcStat and fastCDVD, and the gameplay figure was measured under Node (`web/core-worker.js:183-192`, README:135).
@@ -270,7 +281,7 @@ Done: `ARCH_WASM`/`SIMD_SSE` (`common/Pcsx2Defs.h`, `cmake/BuildParameters.cmake
 5. **Real host command queue** (S, in progress at `pcsx2-wasm/Main.cpp:498`). `Host::RunOnCPUThread` is reached in normal boots: `Patch.cpp:689`, `SDLInputSource.cpp:881`, `ImGuiManager.cpp:1117,1445`. gsrunner's version aborts (`pcsx2-gsrunner/Main.cpp:295-298`). Drain the queue while paused too.
 6. **Native accuracy baseline** (S). x86 build, all interpreters, EE/VU Round=Nearest, DAZ/FTZ off. FTZ is read from the `DenormalsAreZero` key (`Pcsx2Config.cpp:618-621`). Run on a 20-game set and record regressions. This prices the missing MXCSR.
 7. **CPU profile** (S). On native interpreters, split time across EE, VU1, IOP, GS, **IPU, CDVD read and SPU2**, including soundtouch and freesurround on the CPU thread. This settles which JIT comes first and where FMV time goes.
-8. **Wasm speed rerun** (S). Release build under Node with the frame limiter off (the headless runner has no flag for this yet, so it needs a small runner change) and with `-renderer sw` vs `-renderer null`, to separate CPU from SW-GS cost. Put both numbers in §1.
+8. **Wasm speed rerun** (S). Release build under Node with the frame limiter off (the headless runner has no flag for this yet, so it needs a small runner change) and with `-renderer sw` vs `-renderer null`, to separate CPU from SW-GS cost. Put both numbers in §1. Done on 2026-10-16 for the intro (status update at the top): it is EE-interpreter-bound. The frame limiter stayed on, which does not matter for the intro (it never reaches full speed); the menu's headroom above full speed is still unmeasured.
 
 **Exit:**
 - The BIOS reaches OSDSYS in desktop Chrome and Firefox from an uploaded BIOS.
@@ -310,7 +321,7 @@ Done: `ARCH_WASM`/`SIMD_SSE` (`common/Pcsx2Defs.h`, `cmake/BuildParameters.cmake
 8. **Patches, cheats, widescreen** (S). A pinned `patches.zip` fetched at build time and served with the resources (licence recorded in §8). pnach and cheat import into `/data`. A per-feature resource set: `fullscreenui/`, `icons/`, `RedumpDatabase.yaml`.
 9. **USB scope** (S). All ports default to None. GunCon 2 through InputManager pointer events. Mic, camera and wheel force feedback are out of v1.
 10. **Interpreter speedups** (M).
-    - Gate `intEventTest` on `nextEventCycle` (`Interpreter.cpp:270-275`, as the recompiler does at `iR5900.cpp:1401-1412`; timing-sensitive, needs testing).
+    - Gate `intEventTest` on `nextEventCycle` (`Interpreter.cpp:270-275`, as the recompiler does at `iR5900.cpp:1401-1412`; timing-sensitive, needs testing). Done for wasm (`ARCH_WASM`, `intBranchTest()`) on 2026-10-16, together with an IOP idle-loop skip and the BIOS hooks tested at branch ends; checked on the BIOS only, needs testing with games.
     - An EE decoded-block cache (code-word compare on entry).
     - A VU decode cache via the `InterpVU::Clear` hooks.
     - Native SIMD conversions (after the M2 baseline).
