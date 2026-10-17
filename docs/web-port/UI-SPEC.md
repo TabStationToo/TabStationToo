@@ -34,7 +34,7 @@ Space reserved for later, with no controls today:
 **Flows:**
 - **First run:** the runtime starts downloading on load while the slate asks for a BIOS. Neither waits for the other.
 - **BIOS chosen, or returning user:** the title card appears. It says "This visit only" until IndexedDB confirms the save. Nothing ever boots by itself.
-- **Boot pressed before the download finishes:** the boot is queued (`page.autoBoot`). Pressing again cancels it. `?bios=` starts in this state.
+- **Boot pressed before the download finishes:** the boot is queued (`page.autoBoot`). Pressing again cancels it. `?bios=` starts in this state; cancelled while its file is still downloading, it shows that file's title card (without the size until it arrives).
 - **Starting:** elapsed seconds, then "waiting for the first frame". A reassuring line appears at 10 s and a link to the log at 15 s.
 - **Running:** the lights go down and the frame line and tally turn amber. The controls hide after 2.5 s idle. One hint shows on a browser's first boot.
 - **Released** (by Esc, Tab, window blur or a hidden tab): the frame line and tally go neutral, the controls stay visible, and "Click the screen to play" appears.
@@ -260,6 +260,7 @@ With reduced motion, every duration is 0. The controls still hide.
 - **Hints:**
   - First boot: "Arrows move · K confirms (L on Japanese consoles) · ? shows every key"
   - Once per visit, after 5 s under 50% speed: "Running at 18%. Heavy scenes are slow in the browser for now."
+  - When the GPU fails during play and the picture moves to the 2D canvas (not when WebGPU was never available): "The GPU stopped working, so the picture is drawn without it now."
 - **Keys drawer:**
   - "In the system menus ✕ confirms and △ goes back (○ confirms on Japanese consoles)." The glyphs are SVG.
   - "While the PS2 runs, keys you press light up here."

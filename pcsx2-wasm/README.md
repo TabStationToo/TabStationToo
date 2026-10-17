@@ -3,8 +3,11 @@
 TabStationToo is a browser frontend for the WebAssembly build of PCSX2 (the `pcsx2-wasm`
 target). It is built on PCSX2 (GPL-3.0) and is not affiliated with Sony or the PCSX2 project.
 You pick your own PS2 BIOS, press Boot, and the BIOS menu renders in a `<canvas>`, driven from
-the keyboard. It runs the interpreters (no JIT on wasm) with the software renderer, whose output
-is copied to the page as plain RGBA pixels. There is no audio, no disc support and no saving yet.
+the keyboard. It runs the interpreters (no JIT on wasm) with the software renderer. Where the
+browser offers WebGPU, the GS merges, deinterlaces and presents that renderer's output on the GPU
+and posts each frame to the page as an `ImageBitmap` (the WebGPU device,
+`docs/web-port/WEBGPU-DESIGN.md`); otherwise the output is copied to the page as plain RGBA
+pixels and drawn on a 2D canvas. There is no audio, no disc support and no saving yet.
 
 - `Main.cpp`: the frontend (Host callbacks, settings, CPU thread loop, `pcsx2web_*` exports)
 - `web/`: the page (`index.html`, `app.js`, `style.css`, `icons.svg`, `favicon.svg`, `fonts/`,
@@ -52,7 +55,9 @@ reason the page loads nothing from other origins: no CDN, and same-origin, self-
    BIOS. Press **Choose BIOS file…** or drop the file on the page (usually a 4 MB `.bin`, for
    example `SCPH-39001.bin`). On touch-only devices the download waits until you pick a BIOS.
 2. Press **Boot** (or Enter while the screen has focus). If the emulator is still downloading, the
-   boot is queued; press again to cancel. The BIOS menus appear after a few seconds.
+   boot is queued; press again to cancel. The BIOS menus appear after a few seconds. A file that
+   is not a PS2 BIOS (no ROM directory with a ROMVER entry, as PCSX2's own BIOS list requires) is
+   refused before the VM starts, and the slate shows the reason from the log.
 3. When the picture appears, the keyboard goes to the PS2 while the screen has focus (the amber
    frame line and the square under the screen's corner show it):
 
@@ -95,7 +100,53 @@ python3 tools/wasm/serve.py --bios-dir build-wasm/data/PCSX2/bios
 `?bios=<url>` (same origin only) fetches the BIOS and queues a boot for when the runtime is ready
 (Boot cancels it), without saving the BIOS to IndexedDB. `?console=1` also mirrors the log to the
 browser console. A test can poll `window.PCSX2Web.stats()` (VM state, page state as `view`, speed,
-VPS, frames presented and dropped, frame size) and read `window.PCSX2Web.logText()`.
+VPS, frames presented and dropped, frame size, the display path, the vsync of the frame on screen,
+WebGPU frames shown and posted, the devices whose frames arrived, the post-to-display latency) and
+read `window.PCSX2Web.logText()`.
+
+Switches for comparisons and tests (all optional):
+
+| Query | Effect |
+| --- | --- |
+| `?gpu=0` | No WebGPU: the GS presents through its in-memory device and the page draws on a 2D canvas |
+| `?set=Section/Key=Value` | Overrides one setting after the defaults (repeatable), e.g. `?set=EmuCore/GS/deinterlace_mode=2` |
+| `?surface=WxH` | Presents at a fixed size on both paths (e.g. `640x448` with `?set=EmuCore/GS/AspectRatio=Stretch` for 1:1) |
+| `?capture=N,M,...` | Keeps a copy of the first frame presented at vsync N or later, read with `window.PCSX2Web.capture(N)` |
+| `?gsidle=block` | Keeps the GS thread's idle wait blocking with WebGPU, leaving only the device's bounded event-loop turn |
+
+Frames are identified by the vsync they show, counted from boot, not by how many were presented:
+PCSX2 skips presenting duplicate frames (`SkipDuplicateFrames`) based on a wall-clock measure, so
+the count depends on timing while the vsync number does not. `pcsx2web_test_snapshot(n)` asks
+for a screenshot (`GSRenderer::SaveSnapshotToMemory`) at vsync n, written to
+`/snapshots/frame-n.png`; `pcsx2web_test_lose_device()` makes the WebGPU device destroy itself at
+its next present, as on a device loss. `tools/wasm/run-app-headless.mjs` drives all of this in
+headless Chrome on the machine's GPU (see its header for the options).
+
+### WebGPU and the fallback
+
+The GS thread owns the WebGPU device; the module is linked with `-sJSPI` so that thread can wait
+for WebGPU (device creation, readbacks) and so its idle wait lets the worker's event loop run.
+WebGPU is used only where the browser has both WebGPU and JSPI. In a browser without JSPI,
+`jspi-fallback.js` (linked with `--pre-js`) stands in for `WebAssembly.Suspending` and
+`WebAssembly.promising` so the module still starts, and the page uses the 2D path.
+The page receives a `MessagePort` once (`Module.tstFramePort`) and shows every `ImageBitmap`
+posted on it with a `bitmaprenderer` context, at the canvas's backing size, which it reports with
+`pcsx2web_surface_size()` (the device presents at most 4096 pixels on a side, and never more than
+the adapter's largest texture; the page scales a smaller frame to the canvas). **Crisp** switches
+the device between nearest and bilinear filtering (`pcsx2web_set_crisp()`); on the 2D path it
+switches the canvas's CSS scaling instead.
+
+On a device loss (a GPU-process crash, for example) the GS recreates the device and carries on.
+If that fails twice in a row (no new device, or the device lost again within 15 seconds of each
+of two recoveries), the GS gives WebGPU up for the page: its frames come through the 2D path, the
+page swaps in a fresh canvas, and the status line says so when WebGPU frames had been shown. If
+no device can be created at boot (four adapter requests over 0.75 s), only that boot uses the 2D
+path; the next boot tries WebGPU again. Chrome itself may refuse WebGPU adapters for a while after
+GPU-process crashes, which then counts as a failed recovery. A wait for the GPU that times out (a
+readback after 2 s, a pipeline after 10 s) is handled as a device loss. Frames drawn between a
+GPU-process crash and the moment Chrome reports the loss (0.2–0.6 s) are blank, and a frame the
+page already shows does not survive the crash either (its memory was in the crashed process), so
+the canvas stays blank until the recovered device's first frame.
 
 ## UI assets
 
@@ -131,9 +182,12 @@ It calls exports that never block (atomics and a lock-free key queue only):
 | `pcsx2web_state()` | 0 waiting, 1 starting, 2 running, 3 stopped, 4 failed (polled every 500 ms) |
 | `pcsx2web_speed()`, `pcsx2web_vps()` | speed in percent, vertical syncs per second |
 | `pcsx2web_key_code(name)`, `pcsx2web_key(code, pressed)` | resolve host key names once, then queue key events |
-| `pcsx2web_frame()` | address of the frame descriptor: `seq, width, height, pixels, 0` (u32) |
+| `pcsx2web_frame()` | address of the frame descriptor: `seq, width, height, pixels, vsync` (u32) |
+| `pcsx2web_surface_size(w, h, scale)` | the display canvas's backing size and device pixel ratio (WebGPU presents at it) |
+| `pcsx2web_set_crisp(on)` | nearest (1) or bilinear (0) presentation, applied at the next vsync |
+| `pcsx2web_vsync_count()` | vsyncs emulated since the module started |
 
-Each animation frame the page reads `seq` with `Atomics.load`; when it changed, it copies
+On the 2D path, each animation frame the page reads `seq` with `Atomics.load`; when it changed, it copies
 `width * height * 4` bytes of RGBA from `pixels` into an `ImageData` (which cannot use shared
 memory), re-reads `seq` and drops the copy if a newer frame may have overwritten it, then draws it.
 Views on the wasm memory are recreated every frame because memory growth replaces the buffer.
@@ -142,7 +196,11 @@ Views on the wasm memory are recreated every frame because memory growth replace
 
 - No audio, discs, memory cards, save states, gamepads or touch controls yet; fixed key layout.
 - Interpreters only, so most content runs below full speed; the BIOS menu is the target for now.
+- The GS always uses the software renderer; WebGPU only merges, deinterlaces and presents its output
+  (the hardware renderer on WebGPU is the next step of `docs/web-port/WEBGPU-DESIGN.md`).
 - Only the main BIOS file is loaded (no separate ROM1/ROM2/NVM/MEC files).
 - Needs a recent desktop browser with cross-origin isolation (Chrome, Edge or Firefox; Safari is
-  untested). The module reserves 512 MB of memory at start, which many phones refuse.
+  untested). WebGPU presentation also needs JSPI (Chrome 137+, Firefox 157 has it); without it,
+  or without WebGPU, the page draws on a 2D canvas. The module reserves 512 MB of memory at start,
+  which many phones refuse.
 - The dev server is for local use only; hosting elsewhere needs the same COOP/COEP headers.

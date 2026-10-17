@@ -21,6 +21,8 @@
 #include "GS/Renderers/Null/GSRendererNull.h"
 #ifdef __EMSCRIPTEN__
 #include "GS/Renderers/Null/GSDeviceNull.h"
+#include "GS/Renderers/WebGPU/WebGPUHost.h"
+GSDevice* MakeGSDeviceWebGPU();
 #endif
 #include "GS/Renderers/HW/GSRendererHW.h"
 #include "GS/Renderers/HW/GSTextureReplacements.h"
@@ -82,8 +84,12 @@ std::string GetDefaultAdapter()
 static RenderAPI GetAPIForRenderer(GSRendererType renderer)
 {
 #ifdef __EMSCRIPTEN__
-	// No GPU backend on the web yet: Null and SW run on the in-memory null device.
-	if (renderer == GSRendererType::Null || renderer == GSRendererType::SW)
+	// The SW renderer presents through the WebGPU device when the browser offers WebGPU (as it
+	// presents through a GPU device on desktop), and through the in-memory null device otherwise;
+	// the Null renderer always uses the null device.
+	if (renderer == GSRendererType::SW)
+		return WebGPUHost::IsAvailable() ? RenderAPI::WebGPU : RenderAPI::None;
+	if (renderer == GSRendererType::Null)
 		return RenderAPI::None;
 #endif
 
@@ -149,6 +155,10 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 		case RenderAPI::None:
 			g_gs_device = std::make_unique<GSDeviceNull>();
 			break;
+
+		case RenderAPI::WebGPU:
+			g_gs_device = std::unique_ptr<GSDevice>(MakeGSDeviceWebGPU());
+			break;
 #endif
 
 		default:
@@ -157,6 +167,37 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 	}
 
 	bool okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
+#ifdef __EMSCRIPTEN__
+	// A browser can offer WebGPU and still give no working device: no adapter (a blocklisted GPU, a
+	// GPU process still starting, or the browser refusing WebGPU for a while after GPU-process
+	// crashes), or a GPU process that keeps failing. Failing here would stop the VM, so the GS draws
+	// through the null device (the page's 2D canvas) instead. Recovering from a device loss tries
+	// once more and then gives WebGPU up for the page; otherwise (boot) only this GS session does
+	// without it, and the next one tries again.
+	if (!okay && new_api == RenderAPI::WebGPU)
+	{
+		const bool recovering = WebGPUHost::IsRecoveringFromLoss();
+		for (int attempt = recovering ? 2 : 3; attempt <= 3 && !okay; attempt++)
+		{
+			g_gs_device->Destroy();
+			g_gs_device.reset();
+			if (attempt == 2)
+			{
+				Console.Warning("WebGPU device creation failed, trying once more.");
+				g_gs_device = std::unique_ptr<GSDevice>(MakeGSDeviceWebGPU());
+			}
+			else
+			{
+				if (recovering)
+					WebGPUHost::GiveUp("the WebGPU device could not be created twice");
+				else
+					WebGPUHost::NoteUnavailable("no WebGPU device could be created");
+				g_gs_device = std::make_unique<GSDeviceNull>();
+			}
+			okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
+		}
+	}
+#endif
 	if (okay)
 	{
 		okay = ImGuiManager::Initialize();
@@ -182,7 +223,12 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 	if (GSConfig.OsdShowGPUStats && !g_gs_device->SetGPUPipelineStatisticsEnabled(true))
 		GSConfig.OsdShowGPUStats = false;
 
+#ifdef __EMSCRIPTEN__
+	// The WebGPU device may have been replaced by the null device above.
+	Console.WriteLn(Color_StrongGreen, "%s Graphics Driver Info:", GSDevice::RenderAPIToString(g_gs_device->GetRenderAPI()));
+#else
 	Console.WriteLn(Color_StrongGreen, "%s Graphics Driver Info:", GSDevice::RenderAPIToString(new_api));
+#endif
 	Console.WriteLn(g_gs_device->GetDriverInfo());
 
 	return true;

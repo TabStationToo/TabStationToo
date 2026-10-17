@@ -4,6 +4,9 @@
 #include "ImGui/FullscreenUI.h"
 #include "ImGui/ImGuiManager.h"
 #include "GS/Renderers/Common/GSRenderer.h"
+#ifdef __EMSCRIPTEN__
+#include "GS/Renderers/WebGPU/WebGPUHost.h"
+#endif
 #include "GS/GSCapture.h"
 #include "GS/GSDump.h"
 #include "GS/GSGL.h"
@@ -49,6 +52,10 @@ static GSVector4 s_last_draw_rect;
 
 // Last time we reset the renderer due to a GPU crash, if any.
 static Common::Timer::Value s_last_gpu_reset_time;
+#ifdef __EMSCRIPTEN__
+// Recoveries in a row that were followed by another loss within 15 seconds.
+static u32 s_failed_gpu_recoveries = 0;
+#endif
 
 // Screen alignment
 static GSDisplayAlignment s_display_alignment = GSDisplayAlignment::Center;
@@ -548,8 +555,22 @@ bool GSRenderer::BeginPresentFrame(bool frame_skip)
 	if (s_last_gpu_reset_time != 0 &&
 		Common::Timer::ConvertValueToSeconds(current_time - s_last_gpu_reset_time) < 15.0f)
 	{
+#ifdef __EMSCRIPTEN__
+		// Aborting would kill the page. A loss within 15 seconds of the last recovery means that
+		// recovery failed; after two failed recoveries in a row, give WebGPU up: the reopen below
+		// then creates the in-memory null device, and the page goes back to its 2D canvas.
+		if (++s_failed_gpu_recoveries >= 2)
+			WebGPUHost::GiveUp("the GPU device was lost again soon after two recoveries");
+#else
 		pxFailRel("Host GPU lost too many times, device is probably completely wedged.");
+#endif
 	}
+#ifdef __EMSCRIPTEN__
+	else
+	{
+		s_failed_gpu_recoveries = 0;
+	}
+#endif
 	s_last_gpu_reset_time = current_time;
 
 	// Device lost, something went really bad.

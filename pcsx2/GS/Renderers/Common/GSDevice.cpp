@@ -266,6 +266,9 @@ const char* GSDevice::RenderAPIToString(RenderAPI api)
 		CASE(Metal);
 		CASE(Vulkan);
 		CASE(OpenGL);
+#ifdef __EMSCRIPTEN__
+		CASE(WebGPU);
+#endif
 #undef CASE
 		// clang-format on
 	default:

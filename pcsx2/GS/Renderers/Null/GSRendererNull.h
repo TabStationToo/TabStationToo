@@ -14,4 +14,6 @@ protected:
 	void VSync(u32 field, bool registers_written, bool idle_frame) override;
 	void Draw() override;
 	GSTexture* GetOutput(int i, float& scale, int& y_offset) override;
+	// The GSState default aborts ("Not implemented"); the BIOS intro reaches it within ~50 frames.
+	bool IsCoverageAlphaSupported() override { return false; }
 };

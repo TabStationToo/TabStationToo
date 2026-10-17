@@ -16,6 +16,12 @@ struct WindowInfo
 		X11,
 		Wayland,
 		MacOS
+#ifdef __EMSCRIPTEN__
+		// The web page: frames go to it through the WebGPU device's frame port. window_handle is
+		// unused (the GS thread creates its own OffscreenCanvas); the size comes from the page.
+		// (The leading comma leaves the upstream line above as it is.)
+		, Web
+#endif
 	};
 
 	/// The type of the surface. Surfaceless indicates it will not be displayed on screen at all.

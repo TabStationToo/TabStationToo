@@ -21,8 +21,8 @@ target_link_libraries(pcsx2-wasm PRIVATE
 )
 
 # Only what the core reads at runtime, mounted at /resources: the game database, the fonts
-# ImGuiManager loads (Roboto is the host-registered text font; no emoji font) and the SDL
-# controller database.
+# ImGuiManager loads (Roboto is the host-registered text font; no emoji font), the SDL
+# controller database and the WebGPU device's shaders.
 set(PCSX2_WASM_RESOURCES
 	GameIndex.yaml
 	game_controller_db.txt
@@ -30,6 +30,12 @@ set(PCSX2_WASM_RESOURCES
 	fonts/RobotoMono-Medium.ttf
 	fonts/fa-solid-900.ttf
 	fonts/promptfont.otf
+	shaders/webgpu/convert.wgsl
+	shaders/webgpu/imgui.wgsl
+	shaders/webgpu/interlace.wgsl
+	shaders/webgpu/merge.wgsl
+	shaders/webgpu/present.wgsl
+	shaders/webgpu/shadeboost.wgsl
 )
 set(PCSX2_WASM_PRELOAD_OPTIONS)
 set(PCSX2_WASM_PRELOAD_FILES)
@@ -53,8 +59,15 @@ set(PCSX2_WASM_EXPORTS
 	_pcsx2web_key_code
 	_pcsx2web_key
 	_pcsx2web_frame
+	_pcsx2web_surface_size
+	_pcsx2web_set_crisp
+	_pcsx2web_vsync_count
+	_pcsx2web_test_snapshot
+	_pcsx2web_test_lose_device
+	_pcsx2web_test_capture
 )
 list(JOIN PCSX2_WASM_EXPORTS "," PCSX2_WASM_EXPORTS)
+set_property(TARGET pcsx2-wasm APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/jspi-fallback.js")
 
 # main() runs on a worker (PROXY_TO_PTHREAD) so the page's thread never blocks; the pool
 # covers the CPU, GS and software renderer threads without waiting on the page to spawn
@@ -69,6 +82,12 @@ target_link_options(pcsx2-wasm PRIVATE
 	"-sFORCE_FILESYSTEM=1"
 	"-sEXPORTED_FUNCTIONS=${PCSX2_WASM_EXPORTS}"
 	"-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,HEAPU8,HEAP32,wasmMemory"
+	# The GS thread waits for WebGPU (adapter, device, readbacks) by suspending its stack with JSPI
+	# (docs/web-port/WEBGPU-DESIGN.md §3.2). It only wraps main() and thread entry points; the
+	# pcsx2web_* exports stay synchronous. jspi-fallback.js lets the module start in browsers
+	# without JSPI, which then use the 2D path.
+	"-sJSPI"
+	"--pre-js=${CMAKE_CURRENT_SOURCE_DIR}/jspi-fallback.js"
 	# Keep function names so traps give readable stacks.
 	"--profiling-funcs"
 	${PCSX2_WASM_PRELOAD_OPTIONS}

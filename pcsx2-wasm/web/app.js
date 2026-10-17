@@ -67,6 +67,7 @@
 	const FD_WIDTH = 1;
 	const FD_HEIGHT = 2;
 	const FD_PIXELS = 3;
+	const FD_VSYNC = 4;
 	const FD_WORDS = 5;
 	const MAX_FRAME_DIM = 8192;
 
@@ -106,6 +107,18 @@
 
 	const params = new URLSearchParams(location.search);
 	const MIRROR_CONSOLE = params.get('console') === '1';
+	// ?gpu=0 keeps the GS on its in-memory device and this page on the 2D canvas (README).
+	const GPU_ALLOWED = params.get('gpu') !== '0';
+	// The WebGPU device needs JSPI (the GS thread suspends while it waits for the GPU). Without it the
+	// module still starts (pcsx2-wasm/jspi-fallback.js) and draws through the 2D canvas.
+	const HAS_JSPI = typeof WebAssembly === 'object' && typeof WebAssembly.Suspending === 'function' &&
+		typeof WebAssembly.promising === 'function';
+	// Test switches (README "Automated runs"): frames to keep a copy of (by vsync number), a fixed
+	// surface size.
+	const CAPTURE_FRAMES = (params.get('capture') || '').split(',').map(Number).filter((n) => n > 0);
+	const TEST_SURFACE = /^(\d+)x(\d+)$/.exec(params.get('surface') || '');
+	const FRAME_PORT_TIMEOUT_MS = 5000;
+	const LATENCY_SAMPLES = 600;
 
 	// ------------------------------------------------------------------ copy
 
@@ -173,6 +186,7 @@
 		fullscreen: 'Fullscreen',
 		exitFullscreen: 'Exit fullscreen',
 		fullscreenUnavailable: 'Fullscreen isn’t available here.',
+		gpuFallback: 'The GPU stopped working, so the picture is drawn without it now.',
 		announce: {
 			ready: 'Ready to boot.',
 			queued: 'Booting when ready.',
@@ -271,7 +285,24 @@
 		announce: $('announce'),
 		biosInput: $('bios-input'),
 	};
-	const ctx2d = els.canvas.getContext('2d', { alpha: false });
+	// The display canvas keeps the first kind of context it is given, so the context is made when
+	// the first frame arrives: '2d' for GSDeviceNull's pixels, 'bitmaprenderer' for the WebGPU
+	// device's ImageBitmaps. Switching (the GS gave up WebGPU) swaps in a fresh <canvas>.
+	const display = { kind: null, ctx: null };
+	function displayContext(kind) {
+		if (display.kind === kind)
+			return display.ctx;
+		if (display.kind) {
+			const fresh = els.canvas.cloneNode(false);
+			els.canvas.replaceWith(fresh);
+			els.canvas = fresh;
+			observeCanvasSize();
+		}
+		display.ctx = kind === '2d' ? els.canvas.getContext('2d', { alpha: false }) : els.canvas.getContext('bitmaprenderer');
+		display.kind = kind;
+		pageLog(kind === '2d' ? 'Display: 2D canvas (no WebGPU).' : 'Display: WebGPU frames.');
+		return display.ctx;
+	}
 
 	// ------------------------------------------------------------------ page state
 
@@ -332,7 +363,23 @@
 		imageData: null,
 		presentedAtLastPoll: 0,
 		lastPollTime: 0,
+		vsync: 0, // the vsync (counted from boot) whose picture is on screen (either path)
 	};
+
+	// The WebGPU device's frame port (see onFramePort).
+	const gpu = {
+		port: null,
+		frames: 0, // bitmaps shown
+		framesAtBoot: 0, // frames at the last boot request (frames - framesAtBoot came in this boot)
+		lastPosted: 0, // the GS's post count at the last bitmap shown (posted - shown = dropped)
+		latencies: [], // ms from the GS thread's post to transferFromImageBitmap, newest last
+		fallback: '', // why the GS gave up WebGPU, once it has
+		portWarned: false,
+		captures: new Map(), // wanted vsync -> { vsync, width, height, rgba } of the first frame at or after it
+		device: 0, // number of the GS device whose frames arrive (a recovered device has the next one)
+		devices: [], // { device, at: performance.now() of its first frame, vsync }, newest last (at most 8)
+	};
+	const surfaceFeed = { width: 0, height: 0, scale: 0 };
 
 	let api = null; // bound exports, set once the runtime is initialized
 	let wasmMemory = null; // the WebAssembly.Memory object (stable; its .buffer is not)
@@ -710,6 +757,8 @@
 			key: (code, pressed) => M._pcsx2web_key(code, pressed ? 1 : 0),
 			// Pointers are returned as signed i32; make them unsigned.
 			frame: () => M._pcsx2web_frame() >>> 0,
+			surfaceSize: (w, h, scale) => M._pcsx2web_surface_size && M._pcsx2web_surface_size(w, h, scale),
+			setCrisp: (on) => M._pcsx2web_set_crisp && M._pcsx2web_set_crisp(on ? 1 : 0),
 		};
 	}
 
@@ -752,6 +801,8 @@
 			page.pendingBiosBytes = null;
 		}
 		renderProgress();
+		feedSurfaceSize(0, 0, 0);
+		api.setCrisp(els.body.dataset.crisp === 'on');
 		frame.lastPollTime = performance.now();
 		pollTimer = setInterval(poll, POLL_MS);
 		rafId = requestAnimationFrame(drawLoop);
@@ -771,7 +822,23 @@
 	}
 
 	function loadRuntime() {
+		const args = [];
+		if (!GPU_ALLOWED)
+			args.push('-gpu', '0');
+		for (const setting of params.getAll('set'))
+			args.push('-set', setting);
+		if (CAPTURE_FRAMES.length)
+			args.push('-capture', CAPTURE_FRAMES.join(','));
+		if (TEST_SURFACE)
+			args.push('-surface', TEST_SURFACE[0]);
+		if (params.get('gsidle') === 'block')
+			args.push('-gs-idle', 'block');
+		if (GPU_ALLOWED && navigator.gpu && !HAS_JSPI)
+			pageLog('WebGPU needs JSPI, which this browser lacks: drawing through the 2D canvas.', 'warn');
 		window.Module = {
+			arguments: args,
+			tstFramePort: onFramePort,
+			tstGpuFallback: onGpuFallback,
 			print: (text) => appendLog(text, 'stdout'),
 			printErr: (text) => appendLog(text, 'stderr'),
 			setStatus: onSetStatus,
@@ -870,6 +937,7 @@
 		const width = Atomics.load(desc, FD_WIDTH);
 		const height = Atomics.load(desc, FD_HEIGHT);
 		const pixels = Atomics.load(desc, FD_PIXELS);
+		const vsync = Atomics.load(desc, FD_VSYNC);
 		const bytes = width * height * 4;
 		if (!width || !height || width > MAX_FRAME_DIM || height > MAX_FRAME_DIM || !pixels || pixels + bytes > buf.byteLength) {
 			frame.lastSeq = seq; // nothing sensible to show for this one
@@ -898,19 +966,148 @@
 		frame.dropStreak = 0;
 		frame.lastSeq = seq;
 
+		const ctx = displayContext('2d');
 		if (els.canvas.width !== width || els.canvas.height !== height) {
 			els.canvas.width = width;
 			els.canvas.height = height;
 		}
-		ctx2d.putImageData(frame.imageData, 0, 0);
+		ctx.putImageData(frame.imageData, 0, 0);
 		frame.presented++;
 		frame.width = width;
 		frame.height = height;
+		frame.vsync = vsync;
 
 		if (!page.frameSinceBoot && seq !== page.seqAtBoot) {
 			page.frameSinceBoot = true;
 			render();
 		}
+	}
+
+	// ------------------------------------------------------------------ WebGPU frames
+
+	// The GS thread hands over its frame port once per worker (Emscripten's "call a Module handler"
+	// worker command), then posts every frame on it as an ImageBitmap, without returning to its
+	// event loop (docs/web-port/WEBGPU-DESIGN.md §12.1).
+	function onFramePort(port) {
+		gpu.port = port;
+		port.onmessage = (e) => {
+			const m = e.data;
+			if (!m)
+				return;
+			if (m.type === 'frame')
+				showBitmapFrame(m);
+			else if (m.type === 'fallback')
+				onGpuFallback(m.reason, m.permanent);
+		};
+		pageLog('WebGPU frame port connected.');
+	}
+
+	function showBitmapFrame(m) {
+		const bitmap = m.bitmap;
+		if (page.phase !== 'ready' || !bitmap) {
+			if (bitmap)
+				bitmap.close();
+			return;
+		}
+		const ctx = displayContext('bitmaprenderer');
+		const wanted = CAPTURE_FRAMES.filter((n) => m.vsync >= n && !gpu.captures.has(n));
+		if (wanted.length) {
+			const probe = new OffscreenCanvas(bitmap.width, bitmap.height).getContext('2d', { willReadFrequently: true });
+			probe.drawImage(bitmap, 0, 0);
+			const copy = { vsync: m.vsync, width: bitmap.width, height: bitmap.height,
+				rgba: probe.getImageData(0, 0, bitmap.width, bitmap.height).data };
+			for (const n of wanted)
+				gpu.captures.set(n, copy);
+		}
+		if (els.canvas.width !== bitmap.width || els.canvas.height !== bitmap.height) {
+			els.canvas.width = bitmap.width;
+			els.canvas.height = bitmap.height;
+		}
+		const width = bitmap.width, height = bitmap.height;
+		ctx.transferFromImageBitmap(bitmap);
+		gpu.latencies.push(performance.timeOrigin + performance.now() - m.postedAt);
+		if (gpu.latencies.length > LATENCY_SAMPLES)
+			gpu.latencies.shift();
+		if (m.device !== gpu.device) {
+			gpu.device = m.device;
+			gpu.devices.push({ device: m.device, at: performance.now(), vsync: m.vsync });
+			if (gpu.devices.length > 8)
+				gpu.devices.shift();
+			if (m.device > 1)
+				pageLog(`WebGPU: frames from device ${m.device} (recovered or rebooted).`);
+			// A boot that drew through the 2D path (no device then) does not keep a later one off WebGPU.
+			gpu.fallback = '';
+		}
+		gpu.frames++;
+		gpu.lastPosted = m.frame;
+		frame.presented++;
+		frame.width = width;
+		frame.height = height;
+		frame.vsync = m.vsync;
+		if (!page.frameSinceBoot && (page.vmState === STATE.STARTING || page.vmState === STATE.RUNNING)) {
+			page.frameSinceBoot = true;
+			render();
+		}
+	}
+
+	// The GS draws through the 2D path: for good once it gave WebGPU up after repeated device loss
+	// (permanent), or for this boot when it could not create a device. drawLoop() swaps the canvas
+	// when the first 2D frame arrives. The notice is only for a failure during play (UI-SPEC), the
+	// permanent kind with this boot's picture coming through WebGPU: a boot that got no device just
+	// uses the 2D canvas, like a browser without WebGPU, even after earlier boots ran on WebGPU.
+	function onGpuFallback(reason, permanent) {
+		gpu.fallback = reason || 'unknown';
+		pageLog(permanent ? `WebGPU given up: ${gpu.fallback}. Drawing through the 2D canvas.` :
+			`WebGPU unavailable for this boot: ${gpu.fallback}. Drawing through the 2D canvas.`, 'warn');
+		if (permanent && gpu.frames > gpu.framesAtBoot)
+			subtitle(COPY.gpuFallback);
+	}
+
+	function latencySummary() {
+		const v = [...gpu.latencies].sort((a, b) => a - b);
+		if (!v.length)
+			return null;
+		const at = (q) => v[Math.min(v.length - 1, Math.floor(q * v.length))];
+		return { n: v.length, median: at(0.5), p99: at(0.99), max: v[v.length - 1] };
+	}
+
+	// The GS presents at the canvas's backing size in device pixels (WebGPU path; GSDeviceNull keeps
+	// its own 640x480). ?surface=WxH pins it for tests.
+	let canvasObserver = null;
+	function observeCanvasSize() {
+		if (typeof ResizeObserver !== 'function')
+			return;
+		if (!canvasObserver) {
+			canvasObserver = new ResizeObserver((entries) => {
+				for (const entry of entries) {
+					const dp = entry.devicePixelContentBoxSize && entry.devicePixelContentBoxSize[0];
+					const dpr = window.devicePixelRatio || 1;
+					feedSurfaceSize(dp ? dp.inlineSize : Math.round(entry.contentRect.width * dpr),
+						dp ? dp.blockSize : Math.round(entry.contentRect.height * dpr), dpr);
+				}
+			});
+		}
+		canvasObserver.disconnect();
+		try {
+			canvasObserver.observe(els.canvas, { box: 'device-pixel-content-box' });
+		} catch {
+			canvasObserver.observe(els.canvas);
+		}
+	}
+
+	function feedSurfaceSize(width, height, scale) {
+		if (TEST_SURFACE) {
+			width = Number(TEST_SURFACE[1]);
+			height = Number(TEST_SURFACE[2]);
+			scale = 1;
+		}
+		if (width > 0 && height > 0) {
+			surfaceFeed.width = width;
+			surfaceFeed.height = height;
+			surfaceFeed.scale = scale;
+		}
+		if (api && surfaceFeed.width)
+			api.surfaceSize(surfaceFeed.width, surfaceFeed.height, surfaceFeed.scale);
 	}
 
 	function currentSeq() {
@@ -955,6 +1152,12 @@
 		if (!page.frameSinceBoot && page.vmState === STATE.RUNNING && document.visibilityState === 'hidden' &&
 			currentSeq() !== page.seqAtBoot)
 			page.frameSinceBoot = true;
+		// With WebGPU on offer, the GS either hands over its frame port or reports that it gave up.
+		if (GPU_ALLOWED && HAS_JSPI && navigator.gpu && !gpu.port && !gpu.fallback && !gpu.portWarned &&
+			page.vmState === STATE.RUNNING && now - page.bootAt > FRAME_PORT_TIMEOUT_MS && display.kind !== '2d') {
+			gpu.portWarned = true;
+			pageLog(`No WebGPU frame port ${FRAME_PORT_TIMEOUT_MS / 1000} s after boot.`, 'error');
+		}
 
 		checkSlowSpeed(now);
 		render();
@@ -1043,6 +1246,7 @@
 		page.bootsAccepted++;
 		page.bootAt = performance.now();
 		page.frameSinceBoot = false;
+		gpu.framesAtBoot = gpu.frames;
 		page.seqAtBoot = currentSeq();
 		page.slowSince = 0;
 		page.ranMs = 0;
@@ -1686,6 +1890,10 @@
 	function setCrisp(on) {
 		setData('crisp', on ? 'on' : 'off');
 		els.btnCrisp.setAttribute('aria-pressed', on ? 'true' : 'false');
+		// The 2D path scales with CSS (image-rendering); the WebGPU device presents at the canvas's
+		// own size, so it filters (or not) itself.
+		if (api)
+			api.setCrisp(on);
 	}
 
 	// ------------------------------------------------------------------ fullscreen
@@ -2137,8 +2345,10 @@
 			if (page.vmState === STATE.RUNNING)
 				return page.frameSinceBoot ? 'running' : 'starting';
 		}
+		// A ?bios= file still on its way is already the chosen BIOS: cancelling its queued boot shows the
+		// title card it will land on, not the intake.
 		if (!page.bios)
-			return page.autoBoot && page.urlBiosName ? 'queued' : 'nobios';
+			return page.urlBiosName ? (page.autoBoot ? 'queued' : 'ready') : 'nobios';
 		if (page.autoBoot)
 			return 'queued';
 		if (page.outcome === 'failed')
@@ -2207,6 +2417,11 @@
 		return [{ name: b.name }, { sep: 1 }, ...sizeParts(b.size), { sep: 1 }, storedText(b)];
 	}
 
+	// The ?bios= file while it is being fetched: no size yet.
+	function fetchingBiosLine() {
+		return [{ name: page.urlBiosName || '' }, { sep: 1 }, COPY.stored.url];
+	}
+
 	// What the slate shows for a page state (copy from COPY). Null for running: the slate fades
 	// out with the content it had.
 	function slateModel(state) {
@@ -2265,18 +2480,18 @@
 			break;
 		}
 		case 'ready':
-			m.title = [biosTitle(b.name)];
-			m.body = biosLine(b);
+			m.title = [biosTitle(b ? b.name : page.urlBiosName)];
+			m.body = b ? biosLine(b) : fetchingBiosLine();
 			m.meta = true;
 			m.primary = bootPrimary(COPY.boot, 'play');
 			m.alt = true;
-			if (!m.error && b.saveFailed)
+			if (!m.error && b && b.saveFailed)
 				m.error = COPY.saveFailed;
 			break;
 		case 'queued': {
 			const pct = Math.round(loadFraction() * 100);
 			m.title = [COPY.queued, page.runtimeRequested ? ' · ' : '', page.runtimeRequested ? { num: `${pct}%` } : ''];
-			m.body = b ? biosLine(b) : [{ name: page.urlBiosName || '' }, { sep: 1 }, COPY.stored.url];
+			m.body = b ? biosLine(b) : fetchingBiosLine();
 			m.meta = true;
 			m.primary = { label: COPY.boot, icon: 'play', cap: false, action: boot };
 			m.aside = COPY.queuedCancel;
@@ -2877,14 +3092,46 @@
 			height: frame.height,
 			bios: page.bios ? page.bios.name : null,
 			logLines: logTotal,
+			display: display.kind === 'bitmaprenderer' ? 'webgpu' : display.kind,
+			framePort: !!gpu.port,
+			vsync: frame.vsync,
+			gpuFrames: gpu.frames,
+			gpuPosted: gpu.lastPosted,
+			gpuDevices: gpu.devices.map((d) => ({ ...d })),
+			gpuFallback: gpu.fallback,
+			latency: latencySummary(),
+			surface: surfaceFeed.width ? `${surfaceFeed.width}x${surfaceFeed.height}@${surfaceFeed.scale}` : null,
 		}),
 		logText: () => logLines.map((l) => l.text).join('\n'),
+		// Tests: the copy asked for with ?capture= of the first frame presented at vsync n or later
+		// (WebGPU: the bitmap the page received; 2D path: the pixels the GS published), as base64
+		// RGBA with the vsync it shows (frame), or null.
+		capture: (n) => {
+			let c = gpu.captures.get(n);
+			if (!c && api && window.Module._pcsx2web_test_capture) {
+				const ptr = window.Module._pcsx2web_test_capture(n) >>> 0;
+				const buf = heapBuffer();
+				if (ptr && buf) {
+					const h = new Uint32Array(buf, ptr, 4);
+					c = { vsync: h[0], width: h[1], height: h[2], rgba: new Uint8Array(buf, h[3], h[1] * h[2] * 4).slice() };
+					for (let i = 3; i < c.rgba.length; i += 4)
+						c.rgba[i] = 255;
+				}
+			}
+			if (!c)
+				return null;
+			let bin = '';
+			for (let i = 0; i < c.rgba.length; i += 32768)
+				bin += String.fromCharCode.apply(null, c.rgba.subarray(i, i + 32768));
+			return { requested: n, frame: c.vsync, width: c.width, height: c.height, rgba: btoa(bin) };
+		},
 	});
 
 	// ------------------------------------------------------------------ start
 
 	function main() {
 		wireUi();
+		observeCanvasSize();
 		setCrisp(readPref(PREF_CRISP) === '1');
 		page.keepChrome = readPref(PREF_KEEP_CHROME) === '1';
 		els.keepChrome.checked = page.keepChrome;

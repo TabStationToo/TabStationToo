@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "fmt/format.h"
 
@@ -50,7 +52,17 @@ static std::string s_screenshot_path;
 static GSRendererType s_renderer = GSRendererType::SW;
 static u64 s_max_frames = 600;
 static u64 s_frames = 0;
-static std::atomic<bool> s_take_screenshot{false};
+static u64 s_screenshot_frame = 0; // 0 = 10 frames before the end
+
+// -set Section/Key=Value overrides, applied after the defaults. "EmuCore/GS/extrathreads=4" is section
+// "EmuCore/GS", key "extrathreads": the key is whatever follows the last '/' before the '='.
+struct SettingOverride
+{
+	std::string section;
+	std::string key;
+	std::string value;
+};
+static std::vector<SettingOverride> s_setting_overrides;
 
 static bool InitializeConfig()
 {
@@ -123,6 +135,13 @@ static bool InitializeConfig()
 		si.SetStringValue("Filenames", "BIOS", std::string(Path::GetFileName(s_bios_path)).c_str());
 	}
 
+	// The settings interface stores strings, so ints, floats and bools ("true"/"false") all parse back.
+	for (const SettingOverride& ov : s_setting_overrides)
+	{
+		INFO_LOG("Headless: setting [{}] {} = {}", ov.section, ov.key, ov.value);
+		si.SetStringValue(ov.section.c_str(), ov.key.c_str(), ov.value.c_str());
+	}
+
 	VMManager::Internal::LoadStartupSettings();
 	return true;
 }
@@ -143,6 +162,23 @@ static bool ParseCommandLineArgs(int argc, char* argv[])
 			s_max_frames = StringUtil::FromChars<u64>(argv[++i]).value_or(s_max_frames);
 		else if (arg == "-screenshot" && has_value)
 			s_screenshot_path = argv[++i];
+		else if (arg == "-screenshot-frame" && has_value)
+			s_screenshot_frame = StringUtil::FromChars<u64>(argv[++i]).value_or(0);
+		else if (arg == "-set" && has_value)
+		{
+			const std::string_view setting = argv[++i];
+			const std::string_view::size_type eq = setting.find('=');
+			const std::string_view path = setting.substr(0, eq);
+			const std::string_view::size_type slash = path.rfind('/');
+			if (eq == std::string_view::npos || slash == std::string_view::npos || slash == 0 ||
+				slash + 1 == path.size())
+			{
+				Console.ErrorFmt("Bad -set '{}' (use Section/Key=Value, e.g. EmuCore/GS/extrathreads=4)", setting);
+				return false;
+			}
+			s_setting_overrides.push_back({std::string(path.substr(0, slash)), std::string(path.substr(slash + 1)),
+				std::string(setting.substr(eq + 1))});
+		}
 		else if (arg == "-renderer" && has_value)
 		{
 			const std::string_view name = argv[++i];
@@ -159,8 +195,11 @@ static bool ParseCommandLineArgs(int argc, char* argv[])
 		else if (arg == "-help" || arg == "--help")
 		{
 			std::fprintf(stderr, "Usage: %s -approot <dir with resources/> -dataroot <dir> -bios <file> [-frames N]\n"
-								 "         [-renderer sw|null] [-screenshot file.png] [disc image]\n", argv[0]);
+								 "         [-renderer sw|null] [-screenshot file.png [-screenshot-frame N]]\n"
+								 "         [-set Section/Key=Value]... [disc image]\n", argv[0]);
 			std::fprintf(stderr, "  With no disc image the BIOS boots to its menu. -frames 0 runs until stopped.\n");
+			std::fprintf(stderr, "  The screenshot is requested at vsync N (default: 10 before the end) and shows the next frame.\n");
+			std::fprintf(stderr, "  -set overrides a setting after the defaults, e.g. -set EmuCore/GS/extrathreads=4.\n");
 			return false;
 		}
 		else if (!arg.empty() && arg[0] != '-')
@@ -285,9 +324,6 @@ void Host::ReleaseRenderWindow()
 
 void Host::BeginPresentFrame()
 {
-	// GS thread. The CPU thread asks for the screenshot near the last frame.
-	if (s_take_screenshot.exchange(false))
-		GSQueueSnapshot(s_screenshot_path);
 }
 
 void Host::RequestResizeHostDisplay(s32 width, s32 height)
@@ -322,8 +358,24 @@ void Host::OnGameChanged(const std::string& title, const std::string& elf_overri
 
 void Host::OnPerformanceMetricsUpdated()
 {
-	INFO_LOG("Headless: frame {}, {:.1f} VPS, speed {:.1f}%",
-		PerformanceMetrics::GetFrameNumber(), PerformanceMetrics::GetAvgVPS(), PerformanceMetrics::GetSpeed());
+	// Thread usage comes from per-thread CPU clocks. Emscripten has none (pthread_getcpuclockid returns ENOENT,
+	// so every thread reads 0 CPU time): print n/a there and use a CPU profile to see EE- vs GS-bound instead.
+	static const bool has_thread_clocks = Threading::ThreadHandle::GetForCallingThread().GetCPUTime() != 0;
+	std::string threads;
+	if (has_thread_clocks)
+	{
+		threads = fmt::format("EE {:.0f}%, GS {:.0f}%", PerformanceMetrics::GetCPUThreadUsage(),
+			PerformanceMetrics::GetGSThreadUsage());
+		for (u32 i = 0; i < PerformanceMetrics::GetGSSWThreadCount(); i++)
+			threads += fmt::format(", SW{} {:.0f}%", i, PerformanceMetrics::GetGSSWThreadUsage(i));
+	}
+	else
+	{
+		threads = "thread usage n/a";
+	}
+
+	INFO_LOG("Headless: frame {}, {:.1f} VPS, speed {:.1f}%, {}",
+		PerformanceMetrics::GetFrameNumber(), PerformanceMetrics::GetAvgVPS(), PerformanceMetrics::GetSpeed(), threads);
 }
 
 void Host::OnSaveStateLoading(const std::string_view filename)
@@ -511,8 +563,13 @@ void Host::PumpMessagesOnCPUThread()
 {
 	// Called once per vsync.
 	s_frames++;
-	if (!s_screenshot_path.empty() && s_max_frames > 10 && s_frames == s_max_frames - 10)
-		s_take_screenshot.store(true);
+	const u64 screenshot_frame = s_screenshot_frame ? s_screenshot_frame : (s_max_frames > 10 ? s_max_frames - 10 : 0);
+	if (!s_screenshot_path.empty() && s_frames == screenshot_frame)
+	{
+		// Queued on the GS ring behind this vsync, so the next presented frame is captured however far the GS
+		// thread lags behind. A flag polled by the GS thread caught a timing-dependent frame.
+		MTGS::RunOnGSThread([path = s_screenshot_path]() { GSQueueSnapshot(path); });
+	}
 	if (s_max_frames != 0 && s_frames >= s_max_frames && VMManager::GetState() == VMState::Running)
 		VMManager::SetState(VMState::Stopping);
 }

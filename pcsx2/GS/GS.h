@@ -21,6 +21,9 @@ enum class RenderAPI
 	D3D12,
 	Vulkan,
 	OpenGL
+#ifdef __EMSCRIPTEN__
+	, WebGPU // a leading comma, so the upstream line above stays as it is
+#endif
 };
 
 enum class GSVideoMode : u8

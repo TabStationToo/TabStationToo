@@ -52,6 +52,22 @@ void GSRendererSW::Reset(bool hardware_reset)
 	GSRenderer::Reset(hardware_reset);
 }
 
+#ifdef __EMSCRIPTEN__
+void GSRendererSW::PurgeTextureCache(bool sources, bool targets, bool hash_cache)
+{
+	GSRenderer::PurgeTextureCache(sources, targets, hash_cache);
+
+	if (targets)
+	{
+		for (GSTexture*& tex : m_texture)
+		{
+			delete tex;
+			tex = nullptr;
+		}
+	}
+}
+#endif
+
 void GSRendererSW::Destroy()
 {
 	// Need to destroy worker queue first to stop any pending thread work

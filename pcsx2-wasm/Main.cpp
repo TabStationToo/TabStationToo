@@ -4,8 +4,10 @@
 // Browser frontend for the WebAssembly build. Linked with PROXY_TO_PTHREAD, so main()
 // runs on a worker and the browser main thread only runs the page's JavaScript, which
 // talks to us through the pcsx2web_* exports at the bottom of this file. Those exports
-// never block: they only touch atomics and a lock-free key queue. Frames reach the
-// page through a shared descriptor (see PresentFrame()), the BIOS through MEMFS.
+// never block: they only touch atomics and a lock-free key queue. The BIOS arrives through
+// MEMFS. Frames reach the page in one of two ways: with WebGPU, the GS device posts each
+// frame as an ImageBitmap over its frame port (pcsx2/GS/Renderers/WebGPU/WebGPUHost.h);
+// otherwise GSDeviceNull's frames go through a shared descriptor (see PresentFrame()).
 
 #include <algorithm>
 #include <array>
@@ -26,6 +28,8 @@
 #include <emscripten/emscripten.h>
 #include <emscripten/threading.h>
 
+#include <SDL3/SDL_hints.h>
+
 #include "fmt/format.h"
 
 #include "common/Assertions.h"
@@ -45,7 +49,9 @@
 #include "pcsx2/CDVD/CDVD.h"
 #include "pcsx2/GS.h"
 #include "pcsx2/GS/GS.h"
+#include "pcsx2/GS/Renderers/Common/GSDevice.h"
 #include "pcsx2/GS/Renderers/Null/GSDeviceNull.h"
+#include "pcsx2/GS/Renderers/WebGPU/WebGPUHost.h"
 #include "pcsx2/GameList.h"
 #include "pcsx2/Host.h"
 #include "pcsx2/Host/AudioStream.h"
@@ -56,6 +62,7 @@
 #include "pcsx2/MTGS.h"
 #include "pcsx2/PerformanceMetrics.h"
 #include "pcsx2/VMManager.h"
+#include "pcsx2/ps2/BiosTools.h"
 
 namespace
 {
@@ -76,14 +83,16 @@ namespace
 		FRAME_WIDTH,
 		FRAME_HEIGHT,
 		FRAME_PIXELS,
-		FRAME_RESERVED,
+		FRAME_VSYNC, // the vsync (counted since boot) whose picture this is, see CurrentFrameNumber()
 		FRAME_DESCRIPTOR_SIZE,
 	};
 } // namespace
 
-static constexpr u32 WINDOW_WIDTH = 640;
-static constexpr u32 WINDOW_HEIGHT = 480;
+// GSDeviceNull's fixed virtual window, which the page scales (tests can change it with -surface).
+static u32 s_window_width = 640;
+static u32 s_window_height = 480;
 static constexpr const char* BIOS_DIRECTORY = "/bios";
+static constexpr const char* SNAPSHOT_DIRECTORY = "/snapshots";
 
 static MemorySettingsInterface s_settings_interface;
 static std::vector<u8> s_roboto_font_data;
@@ -106,6 +115,49 @@ static std::array<std::vector<u32>, NUM_FRAME_BUFFERS> s_frame_buffers;
 static u32 s_frame_write_index = 0; // GS thread only
 alignas(16) static std::atomic<u32> s_frame_descriptor[FRAME_DESCRIPTOR_SIZE] = {};
 static_assert(sizeof(std::atomic<u32>) == sizeof(u32) && std::atomic<u32>::is_always_lock_free);
+
+// Vsyncs since the module started (CPU thread writes, the page reads).
+static std::atomic<u32> s_vsync_count{0};
+
+// Crisp: nearest-neighbour presentation (WebGPU path). -1 = unchanged since the last apply.
+static std::atomic<int> s_crisp_request{-1};
+static bool s_crisp = false; // CPU thread
+
+// Test hooks (README "Automated runs"): a screenshot at a vsync, and copies of presented 2D-path
+// frames by vsync number. The capture slots are written once by the GS thread and published
+// through their frame word.
+static std::atomic<u32> s_snapshot_vsync{0};
+static constexpr u32 MAX_CAPTURES = 32;
+struct FrameCapture
+{
+	std::atomic<u32> frame; // 0 = not yet; then the vsync number of the frame copied
+	u32 wanted; // the first presented frame at this vsync number or later is copied
+	u32 width;
+	u32 height;
+	std::vector<u32> pixels;
+};
+static FrameCapture s_captures[MAX_CAPTURES];
+static u32 s_capture_header[4]; // frame, width, height, pixels (read by the page after publication)
+
+// GS thread: the number of the vsync being presented, counted from boot. Frames are identified by
+// it rather than by how many were presented, because how many are presented depends on host
+// timing: SkipDuplicateFrames skips presenting frames that PerformanceMetrics' internal-FPS
+// detector, which works on wall-clock windows, considers repeats. Both display paths and the
+// WebGPU device use this number (see GSDeviceWebGPU::EndPresent()).
+static u32 CurrentFrameNumber()
+{
+	// GSRenderer::VSync() counts the vsync after presenting it.
+	return static_cast<u32>(PerformanceMetrics::GetFrameNumber()) + 1;
+}
+
+// -set Section/Key=Value overrides from the page's ?set= (tests), applied after the defaults.
+struct SettingOverride
+{
+	std::string section;
+	std::string key;
+	std::string value;
+};
+static std::vector<SettingOverride> s_setting_overrides;
 
 // Keyboard events: single producer (browser main thread), single consumer (CPU thread).
 // Each entry is a key code with bit 31 set for a press.
@@ -216,6 +268,10 @@ static bool InitializeConfig()
 	for (u32 i = 0; i < 2; i++)
 		si.SetBoolValue("MemoryCards", fmt::format("Slot{}_Enable", i + 1).c_str(), false);
 
+	// No OSD messages in the picture: the page has its own status line, and the 2D path never
+	// showed them (GSDeviceNull draws no ImGui). Tests turn them back on with -set.
+	si.SetIntValue("EmuCore/GS", "OsdMessagesPos", static_cast<int>(OsdOverlayPos::None));
+
 	// Show what the PS2 itself prints (it reaches the page through Module.print).
 	si.SetBoolValue("Logging", "EnableSystemConsole", true);
 	si.SetBoolValue("Logging", "EnableFileLogging", false);
@@ -225,8 +281,77 @@ static bool InitializeConfig()
 
 	si.SetStringValue("Folders", "Bios", BIOS_DIRECTORY);
 
+	// The settings interface stores strings, so ints, floats and bools ("true"/"false") all parse back.
+	for (const SettingOverride& ov : s_setting_overrides)
+	{
+		INFO_LOG("pcsx2-wasm: setting [{}] {} = {}", ov.section, ov.key, ov.value);
+		si.SetStringValue(ov.section.c_str(), ov.key.c_str(), ov.value.c_str());
+	}
+
 	VMManager::Internal::LoadStartupSettings();
 	return true;
+}
+
+// The page's switches, passed as main()'s arguments (Module.arguments): -gpu 0|1 and, for tests,
+// -set Section/Key=Value, -surface WxH, -gs-idle block and -capture N,M,... (vsync numbers of the
+// 2D path's frames to keep a copy of).
+static void ParseArguments(int argc, char* argv[])
+{
+	for (int i = 1; i < argc; i++)
+	{
+		const std::string_view arg = argv[i];
+		const bool has_value = (i + 1 < argc);
+		if (arg == "-gpu" && has_value)
+		{
+			WebGPUHost::SetEnabled(std::string_view(argv[++i]) != "0");
+		}
+		else if (arg == "-gs-idle" && has_value)
+		{
+			// Tests: "block" keeps the GS thread's idle wait blocking with WebGPU, to exercise the
+			// device's bounded event-loop turn on its own.
+			WebGPUHost::SetIdleWaitsSuspend(std::string_view(argv[++i]) != "block");
+		}
+		else if (arg == "-set" && has_value)
+		{
+			const std::string_view setting = argv[++i];
+			const std::string_view::size_type eq = setting.find('=');
+			const std::string_view path = setting.substr(0, eq);
+			const std::string_view::size_type slash = path.rfind('/');
+			if (eq == std::string_view::npos || slash == std::string_view::npos || slash == 0 || slash + 1 == path.size())
+			{
+				Console.ErrorFmt("pcsx2-wasm: bad -set '{}' (use Section/Key=Value)", setting);
+				continue;
+			}
+			s_setting_overrides.push_back({std::string(path.substr(0, slash)), std::string(path.substr(slash + 1)),
+				std::string(setting.substr(eq + 1))});
+		}
+		else if (arg == "-surface" && has_value)
+		{
+			// Tests: GSDeviceNull presents at this size too, so both paths can be compared 1:1.
+			const std::string_view size = argv[++i];
+			const std::string_view::size_type x = size.find('x');
+			const u32 w = StringUtil::FromChars<u32>(size.substr(0, x)).value_or(0);
+			const u32 h = (x != std::string_view::npos) ? StringUtil::FromChars<u32>(size.substr(x + 1)).value_or(0) : 0;
+			if (w > 0 && h > 0 && w <= 8192 && h <= 8192)
+			{
+				s_window_width = w;
+				s_window_height = h;
+			}
+		}
+		else if (arg == "-capture" && has_value)
+		{
+			u32 slot = 0;
+			for (const std::string_view n : StringUtil::SplitString(argv[++i], ','))
+			{
+				if (slot < MAX_CAPTURES)
+					s_captures[slot++].wanted = StringUtil::FromChars<u32>(n).value_or(0);
+			}
+		}
+		else
+		{
+			Console.WarningFmt("pcsx2-wasm: ignoring argument '{}'", arg);
+		}
+	}
 }
 
 // GS thread, once per presented frame.
@@ -242,8 +367,40 @@ static void PresentFrame(const u32* pixels, u32 width, u32 height)
 	s_frame_descriptor[FRAME_HEIGHT].store(height, std::memory_order_relaxed);
 	s_frame_descriptor[FRAME_PIXELS].store(static_cast<u32>(reinterpret_cast<uintptr_t>(buffer.data())),
 		std::memory_order_relaxed);
+	const u32 vsync = CurrentFrameNumber();
+	s_frame_descriptor[FRAME_VSYNC].store(vsync, std::memory_order_relaxed);
 	s_frame_descriptor[FRAME_SEQ].fetch_add(1, std::memory_order_release);
 	s_frame_write_index = (s_frame_write_index + 1) % NUM_FRAME_BUFFERS;
+
+	for (FrameCapture& cap : s_captures)
+	{
+		if (cap.wanted == 0 || vsync < cap.wanted || cap.frame.load(std::memory_order_relaxed) != 0)
+			continue;
+		cap.width = width;
+		cap.height = height;
+		cap.pixels.assign(pixels, pixels + count);
+		cap.frame.store(vsync, std::memory_order_release);
+	}
+}
+
+// Applies Crisp (nearest-neighbour presentation) to the GS settings. CPU thread.
+static void ApplyCrispSetting(bool crisp, bool apply_now)
+{
+	s_crisp = crisp;
+	{
+		auto lock = Host::GetSettingsLock();
+		s_settings_interface.SetIntValue("EmuCore/GS", "linear_present_mode",
+			static_cast<int>(crisp ? GSPostBilinearMode::Off : GSPostBilinearMode::BilinearSmooth));
+	}
+	if (apply_now && VMManager::HasValidVM())
+		VMManager::ApplySettings();
+}
+
+static void CheckCrispRequest(bool apply_now)
+{
+	const int request = s_crisp_request.exchange(-1, std::memory_order_acq_rel);
+	if (request >= 0 && (request != 0) != s_crisp)
+		ApplyCrispSetting(request != 0, apply_now);
 }
 
 static void ProcessKeyEvents()
@@ -327,6 +484,27 @@ static std::string WaitForBootRequest()
 	return name;
 }
 
+// The same test as PCSX2's BIOS list (IsBIOS()): a ROM directory with a ROMVER entry.
+static bool IsValidBIOSFile(const std::string& bios_name)
+{
+	const std::string path = Path::Combine(BIOS_DIRECTORY, bios_name);
+	if (!FileSystem::FileExists(path.c_str()))
+	{
+		Console.ErrorFmt("pcsx2-wasm: BIOS '{}' not found.", path);
+		return false;
+	}
+
+	u32 version, region;
+	std::string description, zone;
+	if (!IsBIOS(path.c_str(), version, description, region, zone))
+	{
+		Console.ErrorFmt("pcsx2-wasm: '{}' is not a PS2 BIOS image: it has no ROM directory with a version.", bios_name);
+		return false;
+	}
+
+	return true;
+}
+
 static void RunVM(const std::string& bios_name)
 {
 	DiscardKeyEvents();
@@ -335,11 +513,20 @@ static void RunVM(const std::string& bios_name)
 		auto lock = Host::GetSettingsLock();
 		s_settings_interface.SetStringValue("Filenames", "BIOS", bios_name.c_str());
 	}
+	CheckCrispRequest(false);
 	VMManager::ApplySettings();
 
 	if (s_stop_requested.load(std::memory_order_acquire))
 	{
 		s_state.store(WEB_STATE_STOPPED, std::memory_order_release);
+		return;
+	}
+
+	// PCSX2 boots whatever file it is given; only its BIOS list checks the contents. Anything else (a
+	// blank or wrong file) runs garbage that resets the PS2 over and over, so check it here first.
+	if (!IsValidBIOSFile(bios_name))
+	{
+		s_state.store(WEB_STATE_FAILED, std::memory_order_release);
 		return;
 	}
 
@@ -417,6 +604,15 @@ int main(int argc, char* argv[])
 {
 	CrashHandler::Install();
 	Log::SetConsoleOutputLevel(LOGLEVEL_DEV);
+
+	// The module is linked with -sJSPI, so emscripten_has_asyncify() is nonzero and SDL_Delay() (and
+	// what waits through it) would suspend the calling thread's stack with emscripten_sleep(). A
+	// suspension SDL does not expect could re-enter it from the event loop; SDL must only block. Set
+	// before SDL is initialized (audio, input).
+	if (!SDL_SetHint(SDL_HINT_EMSCRIPTEN_ASYNCIFY, "0"))
+		Console.Warning("Failed to set SDL_HINT_EMSCRIPTEN_ASYNCIFY.");
+
+	ParseArguments(argc, argv);
 
 	if (!InitializeConfig())
 	{
@@ -526,6 +722,59 @@ EMSCRIPTEN_KEEPALIVE const unsigned int* pcsx2web_frame(void)
 	return reinterpret_cast<const unsigned int*>(s_frame_descriptor);
 }
 
+/// The display canvas's backing size in device pixels and the device pixel ratio. With WebGPU the
+/// GS presents at this size (read at its next present).
+EMSCRIPTEN_KEEPALIVE void pcsx2web_surface_size(int width, int height, float scale)
+{
+	if (width > 0 && height > 0)
+		WebGPUHost::SetSurfaceSize(static_cast<u32>(width), static_cast<u32>(height), scale);
+}
+
+/// Crisp: nearest-neighbour presentation instead of bilinear (applied at the next vsync or boot).
+EMSCRIPTEN_KEEPALIVE void pcsx2web_set_crisp(int crisp)
+{
+	s_crisp_request.store(crisp ? 1 : 0, std::memory_order_release);
+}
+
+/// Vsyncs emulated since the module started.
+EMSCRIPTEN_KEEPALIVE unsigned int pcsx2web_vsync_count(void)
+{
+	return s_vsync_count.load(std::memory_order_relaxed);
+}
+
+/// Test hook: a screenshot (GSRenderer::SaveSnapshotToMemory) at vsync N, written to
+/// /snapshots/frame-N.png in MEMFS.
+EMSCRIPTEN_KEEPALIVE void pcsx2web_test_snapshot(unsigned int vsync)
+{
+	s_snapshot_vsync.store(vsync, std::memory_order_release);
+}
+
+/// Test hook: the WebGPU device destroys itself at its next present, as on a device loss.
+EMSCRIPTEN_KEEPALIVE void pcsx2web_test_lose_device(void)
+{
+	WebGPUHost::RequestTestDeviceLoss();
+}
+
+/// Test hook: the copy of the 2D path's frame for vsync N asked for with -capture (the first frame
+/// presented at vsync N or later), as {vsync of the copied frame, width, height, pixels address},
+/// or null if there is none yet.
+EMSCRIPTEN_KEEPALIVE const unsigned int* pcsx2web_test_capture(unsigned int frame)
+{
+	for (FrameCapture& cap : s_captures)
+	{
+		const u32 copied = cap.frame.load(std::memory_order_acquire);
+		if (frame != 0 && cap.wanted == frame && copied != 0)
+		{
+			s_capture_header[0] = copied;
+			s_capture_header[1] = cap.width;
+			s_capture_header[2] = cap.height;
+			s_capture_header[3] = static_cast<u32>(reinterpret_cast<uintptr_t>(cap.pixels.data()));
+			return s_capture_header;
+		}
+	}
+	return nullptr;
+}
+
 } // extern "C"
 
 //////////////////////////////////////////////////////////////////////////
@@ -535,9 +784,21 @@ EMSCRIPTEN_KEEPALIVE const unsigned int* pcsx2web_frame(void)
 void Host::PumpMessagesOnCPUThread()
 {
 	// Called once per vsync.
+	const u32 vsync = s_vsync_count.fetch_add(1, std::memory_order_relaxed) + 1;
 	ProcessKeyEvents();
 	RunCPUThreadQueue();
 	CheckStopRequest();
+	CheckCrispRequest(true);
+
+	const u32 snapshot = s_snapshot_vsync.load(std::memory_order_acquire);
+	if (snapshot != 0 && vsync >= snapshot)
+	{
+		s_snapshot_vsync.store(0, std::memory_order_relaxed);
+		// Queued on the GS ring behind this vsync, so the next presented frame is captured.
+		Error error;
+		FileSystem::EnsureDirectoryExists(SNAPSHOT_DIRECTORY, false, &error);
+		MTGS::RunOnGSThread([path = fmt::format("{}/frame-{}.png", SNAPSHOT_DIRECTORY, snapshot)]() { GSQueueSnapshot(path); });
+	}
 }
 
 void Host::RunOnCPUThread(std::function<void()> function, bool block /* = false */)
@@ -645,8 +906,8 @@ std::optional<WindowInfo> Host::GetTopLevelWindowInfo()
 	// The GS draws into a fixed virtual window; the page scales the canvas.
 	WindowInfo wi;
 	wi.type = WindowInfo::Type::Surfaceless;
-	wi.surface_width = WINDOW_WIDTH;
-	wi.surface_height = WINDOW_HEIGHT;
+	wi.surface_width = s_window_width;
+	wi.surface_height = s_window_height;
 	wi.surface_scale = 1.0f;
 	return wi;
 }
@@ -669,6 +930,21 @@ void Host::SetMouseLock(bool state)
 
 std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
 {
+	// GS thread. The WebGPU device presents to the page at the canvas's backing size; GSDeviceNull
+	// keeps the fixed virtual window, which the page scales.
+	if (g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::WebGPU)
+	{
+		WindowInfo wi;
+		wi.type = WindowInfo::Type::Web;
+		if (!WebGPUHost::GetSurfaceSize(&wi.surface_width, &wi.surface_height, &wi.surface_scale))
+		{
+			wi.surface_width = s_window_width;
+			wi.surface_height = s_window_height;
+			wi.surface_scale = 1.0f;
+		}
+		return wi;
+	}
+
 	return GetTopLevelWindowInfo();
 }
 

@@ -90,6 +90,11 @@ public:
 	__fi static GSRendererSW* GetInstance() { return static_cast<GSRendererSW*>(g_gs_renderer.get()); }
 
 	void Destroy() override;
+#ifdef __EMSCRIPTEN__
+	// The output textures belong to the GS device: drop them when the device is recreated after a
+	// loss (GSreopen), which the web's WebGPU device recovers from.
+	void PurgeTextureCache(bool sources, bool targets, bool hash_cache) override;
+#endif
 };
 
 MULTI_ISA_UNSHARED_END

@@ -677,8 +677,23 @@ set(pcsx2GSMetalShaders
 if(EMSCRIPTEN)
 	list(REMOVE_ITEM pcsx2GSSources GS/GSCapture.cpp)
 	list(APPEND pcsx2GSSources GS/GSCaptureNull.cpp)
-	# Headless GPU-less device until there is a WebGPU backend.
+	# The GPU-less device: the fallback without WebGPU, and the headless Node runner's device.
 	list(APPEND pcsx2GSSources GS/Renderers/Null/GSDeviceNull.cpp)
+	# The WebGPU device (docs/web-port/WEBGPU-DESIGN.md), on emdawnwebgpu's webgpu.h.
+	list(APPEND pcsx2GSSources
+		GS/Renderers/WebGPU/GSDeviceWebGPU.cpp
+		GS/Renderers/WebGPU/GSTextureWebGPU.cpp
+		GS/Renderers/WebGPU/WebGPUCaches.cpp
+		GS/Renderers/WebGPU/WebGPUHost.cpp
+		GS/Renderers/WebGPU/WebGPUStreamBuffer.cpp
+	)
+	list(APPEND pcsx2GSHeaders
+		GS/Renderers/WebGPU/GSDeviceWebGPU.h
+		GS/Renderers/WebGPU/GSTextureWebGPU.h
+		GS/Renderers/WebGPU/WebGPUCaches.h
+		GS/Renderers/WebGPU/WebGPUHost.h
+		GS/Renderers/WebGPU/WebGPUStreamBuffer.h
+	)
 endif()
 
 if(WIN32)
@@ -1224,6 +1239,23 @@ elseif(NOT EMSCRIPTEN)
 	)
 endif()
 
+if(EMSCRIPTEN)
+	# emdawnwebgpu (webgpu.h and its JS bindings, downloaded by Emscripten on first use) and the
+	# WebGPU device's JS side, for every target linking the core. pcsx2-headless links them too but
+	# never creates the device: Node has no navigator.gpu.
+	set(PCSX2_WEBGPU_HOST_JS "${CMAKE_CURRENT_SOURCE_DIR}/GS/Renderers/WebGPU/webgpu_host.js")
+	# webgpu_host.js, pcsx2-wasm/jspi-fallback.js and common/Semaphore.cpp's suspending wait rely on
+	# Emscripten internals (the pthread runtime's CMD_CALL_HANDLER and specialHTMLTargets, how -sJSPI
+	# wraps imports and exports, emdawnwebgpu's WebGPU.getJsObject); they were checked with 6.0.12.
+	if(NOT EMSCRIPTEN_VERSION VERSION_EQUAL "6.0.12")
+		message(WARNING "The WebGPU device was checked with Emscripten 6.0.12, not ${EMSCRIPTEN_VERSION}: "
+			"check webgpu_host.js, pcsx2-wasm/jspi-fallback.js and the suspending wait in common/Semaphore.cpp.")
+	endif()
+	target_compile_options(PCSX2_FLAGS INTERFACE "--use-port=emdawnwebgpu")
+	target_link_options(PCSX2_FLAGS INTERFACE "--use-port=emdawnwebgpu" "--js-library=${PCSX2_WEBGPU_HOST_JS}")
+	set_property(TARGET PCSX2_FLAGS APPEND PROPERTY INTERFACE_LINK_DEPENDS "${PCSX2_WEBGPU_HOST_JS}")
+endif()
+
 # additonal include directories
 if(ARCH_X86)
 	target_include_directories(PCSX2_FLAGS INTERFACE "${CMAKE_SOURCE_DIR}/3rdparty/xbyak")
@@ -1297,6 +1329,9 @@ function(setup_main_executable target)
 			continue()
 		endif()
 		if (NOT WIN32 AND "${path}" MATCHES "/dx11/") # Don't include unnecessary stuff
+			continue()
+		endif()
+		if (NOT EMSCRIPTEN AND "${path}" MATCHES "/webgpu/") # TabStationToo: the WebGPU device's shaders are web-only
 			continue()
 		endif()
 		if (NOT BUNDLE_EMOJI_FONT AND "${path}" MATCHES "fonts/Twemoji")

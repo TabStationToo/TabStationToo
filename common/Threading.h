@@ -45,6 +45,18 @@ namespace Threading
 	// sleeps the current thread until the specified time point, or later.
 	extern void SleepUntil(u64 ticks);
 
+#ifdef __EMSCRIPTEN__
+	/// Makes WorkSema::WaitForWork() and WaitForWorkWithSpin() on the calling thread suspend its wasm
+	/// stack (JSPI) instead of blocking its worker, so the worker's event loop keeps running while the
+	/// thread is idle: WebGPU delivers its callbacks there. Only for threads of a module linked with
+	/// -sJSPI; the GS thread opts in while it owns a WebGPU device. Other waits keep blocking.
+	extern void SetWaitsSuspend(bool enabled);
+
+	/// True while the calling thread is suspended in KernelSemaphore::WaitSuspending() (its idle wait):
+	/// its worker's event loop runs then, and nothing it runs may enter code that waits again.
+	extern bool InSuspendingSemaphoreWait();
+#endif
+
 	// --------------------------------------------------------------------------------------
 	//  ThreadHandle
 	// --------------------------------------------------------------------------------------
@@ -132,6 +144,13 @@ namespace Threading
 		void* m_sema;
 #elif defined(__APPLE__)
 		semaphore_t m_sema;
+#elif defined(__EMSCRIPTEN__)
+		// musl's sem_t algorithm on words of our own, so that a thread can also wait on it without
+		// blocking (WaitSuspending()). m_value is the count, with bit 31 set while threads wait.
+		std::atomic<s32> m_value{0};
+		std::atomic<s32> m_waiters{0};
+		template <bool suspend>
+		void WaitImpl();
 #else
 		sem_t m_sema;
 #endif
@@ -141,6 +160,11 @@ namespace Threading
 		void Post();
 		void Wait();
 		bool TryWait();
+#ifdef __EMSCRIPTEN__
+		/// Like Wait(), but suspends the calling thread's wasm stack (JSPI) until a Post(), so its
+		/// worker keeps running its event loop. Needs -sJSPI; never call it inside a JS callback.
+		void WaitSuspending();
+#endif
 	};
 
 	/// A semaphore for notifying a work-processing thread of new work in a (separate) queue
