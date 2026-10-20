@@ -8,6 +8,7 @@ add_executable(pcsx2-wasm)
 
 target_sources(pcsx2-wasm PRIVATE
 	Main.cpp
+	WebAudioStream.cpp
 )
 
 target_include_directories(pcsx2-wasm PRIVATE
@@ -95,6 +96,10 @@ add_custom_target(pcsx2-wasm-web
 	VERBATIM
 )
 add_dependencies(pcsx2-wasm pcsx2-wasm-web)
+
+# Audio plays from a Wasm Audio Worklet on the browser's audio thread (WebAudioStream.cpp). The
+# worklet loads pcsx2-wasm.js like the pthreads do, so the site needs no extra file.
+target_link_options(pcsx2-wasm PRIVATE "-sAUDIO_WORKLET=1" "-sWASM_WORKERS=1")
 
 # The page mounts IndexedDB (IDBFS) on /memcards, so memory cards outlive a reload.
 target_link_options(pcsx2-wasm PRIVATE "-lidbfs.js")

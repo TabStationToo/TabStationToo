@@ -374,12 +374,15 @@ static bool InitializeConfig()
 	Host::Internal::SetBaseSettingsLayer(&si);
 	VMManager::SetDefaultSettings(si, true, true, true, true, true);
 
-	// Software renderer into GSDeviceNull, no audio, keyboard only (the default port 1
+	// Software renderer into GSDeviceNull, audio through Web Audio, keyboard only (the default port 1
 	// keyboard bindings stay), memory card slot 1 only. Hotkeys are cleared: most of them
 	// (pause menu, save states, screenshots) need host support that is not there yet.
 	si.SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::SW));
-	// The legacy "OutputModule" key is no longer read; without this Cubeb fails and falls back.
-	si.SetStringValue("SPU2/Output", "Backend", AudioStream::GetBackendName(AudioBackend::Null));
+	// The legacy "OutputModule" key is no longer read; "Backend" is (WebAudioStream.cpp).
+	si.SetStringValue("SPU2/Output", "Backend", AudioStream::GetBackendName(AudioBackend::WebAudio));
+	// Twice the desktop default: most games run below full speed here, and time stretching keeps
+	// up far better with the room (BIOS intro at 41 % speed: 10 dropouts in 26 s instead of 177).
+	si.SetUIntValue("SPU2/Output", "BufferMS", 100);
 	si.SetBoolValue("InputSources", "SDL", false);
 	si.SetBoolValue("InputSources", "XInput", false);
 	si.ClearSection("Hotkeys");

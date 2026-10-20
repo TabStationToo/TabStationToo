@@ -5,10 +5,11 @@ target). It is built on PCSX2 (GPL-3.0) and is not affiliated with Sony or the P
 You pick your own PS2 BIOS and, if you like, a disc image of one of your games, press Boot, and the
 game (or the BIOS menu) renders in a `<canvas>`, driven from the keyboard. It runs the interpreters
 (no JIT on wasm) with the software renderer, whose output is copied to the page as plain RGBA
-pixels. Memory card slot 1 is kept in the browser. There is no audio and there are no save states
-yet.
+pixels. Sound plays through Web Audio. Memory card slot 1 is kept in the browser. There are no save
+states yet.
 
 - `Main.cpp`: the frontend (Host callbacks, settings, CPU thread loop, `pcsx2web_*` exports)
+- `WebAudioStream.cpp`: the audio output (PCSX2's `WebAudio` backend, see [Audio](#audio))
 - `web/`: the page (`index.html`, `app.js`, `disc-worker.js`, `style.css`, `icons.svg`,
   `favicon.svg`, `fonts/`, `icons/`, and `isolation.js` with `coi-serviceworker.js` for hosts
   without isolation headers), copied next to the build output. The design is
@@ -343,9 +344,30 @@ on reading it; after three restarts, or when a new worker cannot start, it stops
 so that what is waiting fails at once. A disc being opened when its worker died is opened again by
 the next one.
 
+## Audio
+
+SPU2 writes its samples into PCSX2's `AudioStream` ring on the CPU thread, as on desktop. The
+`WebAudio` backend (`WebAudioStream.cpp`, linked with `-sAUDIO_WORKLET -sWASM_WORKERS`) reads it
+from a Wasm Audio Worklet: the worklet runs on the browser's audio thread and calls
+`AudioStream::ReadFrames`, which only touches atomics, so neither side waits for the other and the
+page's main thread only makes the asynchronous Web Audio calls. The worklet loads `pcsx2-wasm.js`
+like the pthreads do; there is no extra file. There is one `AudioContext` per sample rate (48 kHz,
+or 44.1 kHz in PS1 mode), created on the first boot and kept: it is suspended while no VM runs.
+Browsers start audio only after a click or key press on the page; the context starts on the next
+one if the boot did not come from one.
+
+Settings differ from desktop in one place: a 100 ms buffer instead of 50 ms, because most content
+runs below full speed and the time stretcher needs the room. Measured in headless Chrome on the BIOS
+intro (about 41 % speed): 177 dropouts in 26 s with 50 ms, 10 with 100 ms and 2 with 200 ms (which
+delays sound by a fifth of a second). Time stretching costs under 1 % of speed there.
+`pcsx2-headless` keeps the null backend (Node has no Web Audio).
+
 ## Current limitations
 
-- No audio, save states, gamepads or touch controls yet; fixed key layout. One memory card (slot 1).
+- No save states, gamepads, touch controls or volume control yet; fixed key layout. One memory card
+  (slot 1).
+- Sound below full speed is time-stretched (slowed down), and still drops out at times when the
+  speed swings.
 - Discs: uncompressed single-file images only (no CHD, CSO/ZSO, GZ, blockdump or multi-file
   BIN/CUE), and no disc swap or eject while a game runs.
 - Interpreters only, so most content runs below full speed: game menus mostly run at 60–100 %,

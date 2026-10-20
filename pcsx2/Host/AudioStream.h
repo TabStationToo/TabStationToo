@@ -147,6 +147,12 @@ private:
 	static std::unique_ptr<AudioStream> CreateSDLAudioStream(u32 sample_rate, const AudioStreamParameters& parameters,
 		bool stretch_enabled, Error* error);
 
+#ifdef __EMSCRIPTEN__
+	// Provided by the frontend: the browser's (pcsx2-wasm/WebAudioStream.cpp) or a stub in Node.
+	static std::unique_ptr<AudioStream> CreateWebAudioStream(u32 sample_rate, const AudioStreamParameters& parameters,
+		bool stretch_enabled, Error* error);
+#endif
+
 	void AllocateBuffer();
 	void DestroyBuffer();
 

@@ -289,7 +289,7 @@ With reduced motion, every duration is 0. The controls still hide.
   - "About TabStationToo."
   - "PCSX2, compiled to WebAssembly, running entirely in this tab."
   - "Use only a BIOS dumped from a console you own. It's kept in this browser (IndexedDB), never sent anywhere, and you can forget it from the BIOS menu."
-  - "Works today: the BIOS menus and games from disc images, with a keyboard, and a memory card kept in this browser. Most games run well below full speed for now. Not yet: audio, save states, gamepads."
+  - "Works today: the BIOS menus and games from disc images, with a keyboard, sound, and a memory card kept in this browser. Most games run well below full speed for now. Not yet: save states, gamepads."
   - "Built from PCSX2, GPL-3.0-or-later. Source"
   - "PlayStation and PS2 are trademarks of Sony Interactive Entertainment. This project isn't affiliated with or endorsed by Sony."
   - "Type: Archivo and Chivo Mono by Omnibus-Type (OFL 1.1). Icons: Phosphor (MIT)." Each name links to its licence file.

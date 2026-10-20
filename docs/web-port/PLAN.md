@@ -307,7 +307,7 @@ Done: `ARCH_WASM`/`SIMD_SSE` (`common/Pcsx2Defs.h`, `cmake/BuildParameters.cmake
 
 **Tasks:**
 1. **SDL audio and pad first** (S). Fix `DEFAULT_BACKEND` on wasm (`Config.h:981`). Run with `ALLOW_BLOCKING_ON_MAIN_THREAD=0` and ASSERTIONS to check that SDL's page-thread audio callback never blocks.
-2. **`AudioBackend::WebAudio`** (M). Enum `Host/AudioStreamTypes.h:11-17`, factory `AudioStream.cpp:107-128`, Wasm Audio Worklet calling `ReadFrames`, AudioContext resumed on gesture. Below a speed threshold, mute or disable stretch.
+2. **`AudioBackend::WebAudio`** (M). Enum `Host/AudioStreamTypes.h:11-17`, factory `AudioStream.cpp:107-128`, Wasm Audio Worklet calling `ReadFrames`, AudioContext resumed on gesture. Below a speed threshold, mute or disable stretch. Done on 2026-10-19 (`pcsx2-wasm/WebAudioStream.cpp`), which made task 1's SDL step unnecessary: SDL's Emscripten driver runs a ScriptProcessorNode on the page thread and takes a mutex there. Measured: time stretch costs under 1 % of speed and sounds far better than no stretch at 41 % speed once the buffer is 100 ms (now the web default), so stretch stays on; no mute threshold yet.
 3. **`WebGamepadInputSource`** (M). `Input/InputSource.h`, registered in `InputManager.cpp:1871-1877`. Keyboard via `KeyboardEvent.code` (`ConvertHostKeyboard*`). Show a "press a button" prompt. Map extra multitap ports to the keyboard. Document the 4-pad and no-pressure limits.
 4. **Persistence** (M).
    - File memcards with `fflush`+`fsync` after each Save/EraseBlock, or a per-vsync flush of dirty cards (`MemoryCardFile.cpp:441-525`), with fsync mapped to `SyncAccessHandle.flush()`.

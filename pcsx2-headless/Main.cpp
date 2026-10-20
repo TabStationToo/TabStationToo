@@ -884,3 +884,14 @@ std::string Host::TranslatePluralToString(const char* context, const char* msg, 
 	return ret;
 }
 
+
+#ifdef __EMSCRIPTEN__
+// The browser frontend plays Web Audio (pcsx2-wasm/WebAudioStream.cpp). Node has none; this runner
+// uses the null backend.
+std::unique_ptr<AudioStream> AudioStream::CreateWebAudioStream(u32 sample_rate, const AudioStreamParameters& parameters,
+	bool stretch_enabled, Error* error)
+{
+	Error::SetStringView(error, "Web Audio is not available in Node.");
+	return {};
+}
+#endif

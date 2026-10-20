@@ -122,6 +122,11 @@ std::unique_ptr<AudioStream> AudioStream::CreateStream(AudioBackend backend, u32
 		case AudioBackend::Null:
 			return CreateNullStream(sample_rate, parameters.buffer_ms);
 
+#ifdef __EMSCRIPTEN__
+		case AudioBackend::WebAudio:
+			return CreateWebAudioStream(sample_rate, parameters, stretch_enabled, error);
+#endif
+
 		default:
 			Error::SetStringView(error, "Unknown audio backend.");
 			return nullptr;
@@ -149,11 +154,17 @@ static constexpr const std::array s_backend_names = {
 	"Null",
 	"Cubeb",
 	"SDL",
+#ifdef __EMSCRIPTEN__
+	"WebAudio",
+#endif
 };
 static constexpr const std::array s_backend_display_names = {
 	TRANSLATE_NOOP("AudioStream", "Null (No Output)"),
 	TRANSLATE_NOOP("AudioStream", "Cubeb"),
 	TRANSLATE_NOOP("AudioStream", "SDL"),
+#ifdef __EMSCRIPTEN__
+	TRANSLATE_NOOP("AudioStream", "Web Audio"),
+#endif
 };
 
 std::optional<AudioBackend> AudioStream::ParseBackendName(const char* str)
