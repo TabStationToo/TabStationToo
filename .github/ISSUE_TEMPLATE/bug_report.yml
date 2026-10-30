@@ -1,0 +1,96 @@
+name: Bug report
+description: A game that doesn't boot, runs slowly, looks or sounds wrong, or a page that misbehaves.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Please never attach or link game discs (ISO, CHD…), BIOS files or memory card dumps.
+
+  - type: input
+    id: game
+    attributes:
+      label: Game and serial
+      description: 'The title and serial as the log prints them (`Game: … (SLUS-…)`), and the region. Write "page" if no game is involved.'
+      placeholder: Final Fantasy XII (SLUS-20963), NTSC-U
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What goes wrong
+      options:
+        - Doesn't boot / black screen
+        - Crash or freeze
+        - Slow (below 100 % speed)
+        - Graphics wrong
+        - Sound wrong
+        - Controls
+        - Saves (memory cards, save states)
+        - The page itself (library, menus, settings)
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead. Where in the game (menu, level, cutscene) and whether it happens every time.
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      description: From the browser's About page.
+      placeholder: Chrome 152.0.7480.85
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11, macOS 16, Ubuntu 26.04…
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: MENU → **Check WebGPU** names it. Paste that line as it is.
+      placeholder: WebGPU works on amd rdna-3 … The GPU renderer can run.
+    validations:
+      required: true
+
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU and RAM
+      description: Most useful for speed reports.
+      placeholder: Ryzen 7 7840U, 32 GB
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings you changed
+      description: Renderer, upscaling, underclock, `?` options in the address bar… Leave empty if none.
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Press **INFO** (or the <kbd>`</kbd> key) and **Copy**, then paste it here. It includes the build and the game's serial. For speed reports, a **Recorder** capture helps too.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or video
+      description: Drag files here if they show the problem.
