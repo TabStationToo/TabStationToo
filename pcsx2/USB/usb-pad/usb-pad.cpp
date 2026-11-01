@@ -377,8 +377,18 @@ namespace usb_pad
 		}
 	}
 
+	static RawFFBHandler s_raw_ffb_handler = nullptr;
+
+	void SetRawFFBHandler(RawFFBHandler handler)
+	{
+		s_raw_ffb_handler = handler;
+	}
+
 	int PadState::TokenOut(const u8* data, int len)
 	{
+		if (s_raw_ffb_handler && HasFF())
+			s_raw_ffb_handler(port, data, len);
+
 		const ff_data* ffdata = reinterpret_cast<const ff_data*>(data);
 		bool hires = (type == WT_DRIVING_FORCE_PRO || type == WT_DRIVING_FORCE_PRO_1102);
 		ParseFFData(ffdata, hires);
@@ -698,6 +708,8 @@ namespace usb_pad
 			/* hid specific requests */
 			case SET_REPORT:
 				// no idea, Rock Band 2 keeps spamming this
+				if (length >= 7 && s->HasFF())
+					s->TokenOut(data, length);
 				if (length > 0)
 				{
 					/* 0x01: Num Lock LED
