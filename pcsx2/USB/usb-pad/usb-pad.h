@@ -295,6 +295,12 @@ namespace usb_pad
 		bool use_ffb_dropout_workaround = false;
 	};
 
+	/// Receives every output report the game sends to an emulated wheel (Driving Force, Driving Force Pro, GT Force):
+	/// the classic Logitech force feedback commands, raw. Called on the CPU thread before PCSX2 parses the report for
+	/// its own force feedback device. The browser build forwards them to a real Logitech wheel.
+	using RawFFBHandler = void (*)(u32 port, const u8* data, int len);
+	void SetRawFFBHandler(RawFFBHandler handler);
+
 	struct PadState
 	{
 		PadState(u32 port_, PS2WheelTypes type_);

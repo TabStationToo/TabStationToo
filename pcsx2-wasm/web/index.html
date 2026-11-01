@@ -23,6 +23,7 @@
 <link rel="stylesheet" href="library/console-pads.css">
 <link rel="stylesheet" href="library/console-tv.css">
 <script src="app.js" defer></script>
+<script src="wheel.js" defer></script>
 <!-- The disc library (UI-SPEC.md §15): a module, after app.js, which it talks to through
      window.PCSX2WebLibrary. It is the one part of the page that reaches another origin (disc art). -->
 <script type="module" src="library/player-library.js"></script>
@@ -142,6 +143,11 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
         </g>
         <!-- the model plate -->
         <rect class="w-plate" x="412" y="44" width="92" height="14" rx="2"/>
+        <!-- USB ports 1 and 2 -->
+        <text class="w-print" x="458" y="79">USB</text>
+        <rect class="w-hole" x="420" y="86" width="30" height="11" rx="1.5"/>
+        <rect class="w-hole" x="466" y="86" width="30" height="11" rx="1.5"/>
+        <path class="w-mark" d="M426 91.5 H444 M472 91.5 H490"/>
         <!-- the disc tray -->
         <rect class="w-tray" x="524" y="40" width="380" height="44" rx="2"/>
         <path class="w-groove" d="M528 62 H900"/>
@@ -157,6 +163,9 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
            pulls the plug out or pushes it back in. -->
       <button type="button" class="bar-hot bar-port" id="port-1" data-port="1" aria-pressed="false" aria-label="Controller port 1"><span class="plug" aria-hidden="true"></span><span class="plug-boot" aria-hidden="true"></span><span class="tip" aria-hidden="true"></span></button>
       <button type="button" class="bar-hot bar-port" id="port-2" data-port="2" aria-pressed="false" aria-label="Controller port 2"><span class="plug" aria-hidden="true"></span><span class="plug-boot" aria-hidden="true"></span><span class="tip" aria-hidden="true"></span></button>
+      <!-- USB ports: a racing wheel the PS2 sees in each, and the real wheel that plays it (wheel.js). -->
+      <button type="button" class="bar-hot bar-usb" id="usb-1" data-usb="1" aria-haspopup="true" aria-controls="usb-menu" aria-expanded="false" aria-label="USB port 1: nothing plugged in"><span class="usb-plug" aria-hidden="true"></span><span class="tip" aria-hidden="true">USB 1</span></button>
+      <button type="button" class="bar-hot bar-usb" id="usb-2" data-usb="2" aria-haspopup="true" aria-controls="usb-menu" aria-expanded="false" aria-label="USB port 2: nothing plugged in"><span class="usb-plug" aria-hidden="true"></span><span class="tip" aria-hidden="true">USB 2</span></button>
       <button type="button" class="bar-hot bar-plate bios-btn" id="bios-btn" popovertarget="bios-menu" aria-controls="bios-menu" aria-expanded="false">
         <span class="vh">BIOS: </span><span class="bios-btn-name" id="bios-btn-name"></span>
       </button>
@@ -492,6 +501,18 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
     </div>
   </div>
 
+  <div class="menu gfx-menu usb-menu" id="usb-menu" popover role="group" aria-labelledby="usb-menu-title">
+    <p class="menu-file"><span class="menu-where">The PS2's USB port</span><span class="gfx-mode" id="usb-menu-title">USB 1</span></p>
+    <fieldset class="gfx-choice" id="usb-choice">
+      <legend class="sound-label">Plugged in</legend>
+      <label class="gfx-option"><input type="radio" name="usb-type" value="-1" checked><span>Nothing</span></label>
+      <label class="gfx-option"><input type="radio" name="usb-type" value="0"><span>Driving Force<span class="gfx-hint">Logitech wheel</span></span></label>
+      <label class="gfx-option"><input type="radio" name="usb-type" value="1"><span>Driving Force Pro<span class="gfx-hint">900°, finer force feedback</span></span></label>
+      <label class="gfx-option"><input type="radio" name="usb-type" value="2"><span>Driving Force Pro (rev 11.02)<span class="gfx-hint">For games that need this revision</span></span></label>
+      <label class="gfx-option"><input type="radio" name="usb-type" value="3"><span>GT Force<span class="gfx-hint">Logitech wheel</span></span></label>
+    </fieldset>
+  </div>
+
   <div class="menu gfx-menu" id="ee-menu" popover role="group" aria-label="Underclock">
     <p class="menu-file"><span class="menu-where">This game</span><span class="gfx-mode" id="ee-game">No game running</span></p>
     <fieldset class="gfx-choice" id="ee-choice" aria-describedby="ee-reason">
@@ -550,6 +571,16 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
   <h2 class="lbl pads-title" id="pads-title">Controllers</h2>
   <div class="pads-row" id="pads-row"></div>
 </section>
+<!-- The racing wheels on the PS2's USB ports (wheel.js), under the controllers, each cabled to its USB socket and
+     played with whatever controls are mapped to it: any gamepad or wheel the browser sees, or keys. -->
+<section class="pads wheels" id="wheels" aria-labelledby="wheels-title" hidden>
+  <h2 class="lbl pads-title" id="wheels-title">Wheels</h2>
+  <div class="pads-row" id="wheels-row"></div>
+</section>
+<svg class="cables usb-cables" id="usb-cables" aria-hidden="true" focusable="false">
+  <path class="cable-wall" id="usb-cable-1-wall" pathLength="1"/><path class="cable-core" id="usb-cable-1" pathLength="1"/>
+  <path class="cable-wall" id="usb-cable-2-wall" pathLength="1"/><path class="cable-core" id="usb-cable-2" pathLength="1"/>
+</svg>
 <!-- The credits, on the floor's far side, below the controllers. -->
 <footer class="credits">
   <p><span class="seg">Use a BIOS and discs from your own console; they never leave this browser&nbsp;<span class="sep" aria-hidden="true">·</span></span> <span class="seg">Built on <a href="https://github.com/PCSX2/pcsx2" target="_blank" rel="noopener noreferrer">PCSX2<svg class="icon-ext" aria-hidden="true" focusable="false"><use href="icons.svg#i-arrow-up-right"/></svg><span class="vh"> (opens in a new tab)</span></a> (GPL-3.0)&nbsp;<span class="sep" aria-hidden="true">·</span></span> <span class="seg"><a class="source-link" href="https://github.com/TabStationToo/TabStationToo" target="_blank" rel="noopener noreferrer">Source<svg class="icon-ext" aria-hidden="true" focusable="false"><use href="icons.svg#i-arrow-up-right"/></svg><span class="vh"> (opens in a new tab)</span></a>&nbsp;<span class="sep" aria-hidden="true">·</span></span> <span class="seg">Not affiliated with Sony or the PCSX2 project</span></p>
@@ -569,6 +600,84 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
 
 <!-- A controller, drawn as a wireframe like the console (600 × 310 units) and without any maker's marks. app.js
      lays a button over each control, showing the key or gamepad control that plays it. -->
+<!-- A racing wheel, a generic one drawn like the controllers (600 × 310 units, the same frame): the rim with its
+     spokes, hub buttons and paddles, and two pedals. wheel.js lays a button over each control, showing what plays it. -->
+<template id="wheel-template">
+  <section class="pad-unit wheel-unit">
+    <div class="pad-art">
+      <svg class="pad-svg" viewBox="0 0 600 310" aria-hidden="true" focusable="false">
+        <!-- lines out to the labels of the steering and the paddles -->
+        <path class="p-lead" d="M60 155 H52 M340 155 H358 M86 64 L64 40 H56 M314 64 L336 40 H344"/>
+        <!-- the shift paddles, behind the rim -->
+        <path class="p-sh" d="M74 80 L94 56 L114 72 L94 96 Z"/>
+        <path class="p-sh" d="M326 80 L306 56 L286 72 L306 96 Z"/>
+        <!-- the rim, which turns with the steering: two circles, its grips and the top mark -->
+        <g class="w-rotor">
+          <circle class="p-part" cx="200" cy="155" r="140"/>
+          <circle class="p-body w-hole" cx="200" cy="155" r="122"/>
+          <circle class="p-line" cx="200" cy="155" r="122"/>
+          <path class="p-line" d="M68 112 Q58 155 68 198 M332 112 Q342 155 332 198"/>
+          <path class="w-mark" d="M200 15 V33"/>
+        </g>
+        <!-- the spokes and the hub -->
+        <path class="p-part" d="M80 128 H320 Q324 155 320 182 H226 L222 276 H178 L174 182 H80 Q76 155 80 128 Z"/>
+        <rect class="p-plate" x="164" y="98" width="72" height="110" rx="10"/>
+        <rect class="p-line" x="164" y="98" width="72" height="110" rx="10"/>
+        <!-- the D-pad on the left spoke, the face buttons on the right one -->
+        <path class="p-key w-dpad" d="M120 123 H140 V141 L130 150 L120 141 Z M120 187 H140 V169 L130 160 L120 169 Z M98 145 V165 H116 L125 155 L116 145 Z M162 145 V165 H144 L135 155 L144 145 Z"/>
+        <circle class="p-key w-face" cx="270" cy="133" r="10"/>
+        <circle class="p-key w-face" cx="248" cy="155" r="10"/>
+        <circle class="p-key w-face" cx="292" cy="155" r="10"/>
+        <circle class="p-key w-face" cx="270" cy="177" r="10"/>
+        <!-- the GT Force's four buttons instead: X and A on the left spoke, Y and B on the right one -->
+        <circle class="p-key w-gtf" cx="130" cy="140" r="10"/>
+        <circle class="p-key w-gtf" cx="130" cy="170" r="10"/>
+        <circle class="p-key w-gtf" cx="270" cy="140" r="10"/>
+        <circle class="p-key w-gtf" cx="270" cy="170" r="10"/>
+        <!-- on the hub: L2 R2, Select Start, L3 R3 -->
+        <rect class="p-key w-l2r2" x="168" y="105" width="28" height="15" rx="3"/>
+        <rect class="p-key w-l2r2" x="204" y="105" width="28" height="15" rx="3"/>
+        <rect class="p-key w-selstart" x="168" y="133" width="28" height="14" rx="3"/>
+        <rect class="p-key w-selstart" x="204" y="133" width="28" height="14" rx="3"/>
+        <circle class="p-key w-l3r3" cx="182" cy="190" r="10"/>
+        <circle class="p-key w-l3r3" cx="218" cy="190" r="10"/>
+        <!-- the Driving Force Pro's gear stick, right of the wheel: shifter - and shifter + -->
+        <g class="w-shifter">
+          <rect class="p-part" x="364" y="240" width="32" height="30" rx="6"/>
+          <path class="p-line" d="M380 244 V266"/>
+          <circle class="p-key" cx="380" cy="255" r="7"/>
+          <text class="p-name" x="406" y="232">-</text>
+          <text class="p-name" x="406" y="286">+</text>
+        </g>
+        <!-- the pedals: brake, gas -->
+        <rect class="p-part" x="420" y="110" width="170" height="185" rx="8"/>
+        <rect class="p-key" x="440" y="140" width="60" height="112" rx="6"/>
+        <rect class="p-key" x="515" y="128" width="60" height="134" rx="6"/>
+        <path class="p-line" d="M452 156 H488 M452 236 H488 M527 146 H563 M527 244 H563"/>
+        <text class="p-name" x="470" y="282">BRAKE</text>
+        <text class="p-name" x="545" y="282">GAS</text>
+      </svg>
+      <div class="pad-spots"></div>
+    </div>
+    <div class="pad-foot">
+      <h3 class="pad-title"></h3>
+    </div>
+    <p class="pad-status" role="status"></p>
+    <p class="wheel-ffb-live wheel-read" aria-hidden="true"></p>
+    <div class="pad-actions">
+      <button type="button" class="btn-quiet wheel-map">Map all controls</button>
+      <button type="button" class="btn-quiet wheel-clear">Clear mapping</button>
+    </div>
+    <div class="wheel-ffb">
+      <p class="wheel-ffb-status"><span class="sound-label">Force feedback goes to</span> <span class="wheel-ffb-name">nothing</span></p>
+      <p class="wheel-ffb-live" hidden></p>
+      <div class="pad-actions">
+        <button type="button" class="btn-quiet wheel-ffb-btn">Choose FFB passthrough device…</button>
+      </div>
+    </div>
+  </section>
+</template>
+
 <template id="pad-template">
   <section class="pad-unit">
     <div class="pad-art">

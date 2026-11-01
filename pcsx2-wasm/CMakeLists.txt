@@ -92,6 +92,12 @@ list(APPEND PCSX2_WASM_EXPORTS
 	_pcsx2web_disc_change_result
 	_pcsx2web_pad_vibration
 )
+# The racing wheels on the two USB ports (Main.cpp, "Racing wheels").
+list(APPEND PCSX2_WASM_EXPORTS
+	_pcsx2web_set_wheel
+	_pcsx2web_wheel
+	_pcsx2web_ffb_ring
+)
 # Per-game TFX pipeline lists (Main.cpp, WebGPUHost.h).
 list(APPEND PCSX2_WASM_EXPORTS
 	_pcsx2web_tfx_log
