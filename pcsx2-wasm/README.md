@@ -130,7 +130,7 @@ reason the page loads nothing from other origins: no CDN, and same-origin, self-
    **Forget this BIOS**); the memory card slots open their cards' menus, and the controller ports
    plug and unplug Player 1 and Player 2. The remote beside it has **VOL** − and + and **MUTE**
    (M mutes and unmutes from the screen too; both are remembered in this browser), **WIDE**
-   (Fullscreen; Alt+Enter, or a double-click on the picture), **PICTURE** (Smooth, Crisp or CRT),
+   (Fullscreen; Alt+Enter, or a double-click on the picture), **PICTURE** (Smooth, Crisp, CRT or CRT 2),
    **MENU** (Graphics: renderer and resolution), **CLOCK** (Underclock, per game), **INFO** (the
    Log, `` ` ``, ² on AZERTY) and, with `?threads=1`, **REC** (the Recorder). `?` opens the Keys
    drawer. Under the console, the two controllers show what plays each control; click one to change
@@ -588,7 +588,7 @@ It calls exports that never block (atomics and a lock-free key queue only):
 | `pcsx2web_set_crisp(on)` | nearest (1) or bilinear (0) presentation, applied at the next vsync |
 | `pcsx2web_pad_vibration()` | address of two `u32` words, one per pad port: the game's motors as `large << 8 \| small` (0-255 each), updated on every pad poll (`InputManager::SetPadVibrationIntensity`) and zeroed on pause. The page plays them on that player's gamepads (`rumbleFrame()`); `PCSX2Web.stats().rumble` shows them |
 | `pcsx2web_set_upscale(n)` | the internal resolution (`EmuCore/GS/upscale_multiplier`): 1 (native, the default) or 2 (twice the PS2's lines), applied at the next vsync or boot; other values are ignored. The hardware renderer only (the software renderer ignores it); the GS clamps it to the adapter's largest texture. The page's Graphics menu offers Native and 2× |
-| `pcsx2web_set_tv_shader(n)` | PCSX2's TV shader (`EmuCore/GS/TVShader`: 0 none, 1 scanlines, 2 diagonal, 3 triangular, 4 wave, 5 Lottes CRT, 6 4xRGSS, 7 NxAGSS), applied at the next vsync; the WebGPU device only (the 2D path's device has none). The page's CRT picture mode is 5 |
+| `pcsx2web_set_tv_shader(n)` | PCSX2's TV shader (`EmuCore/GS/TVShader`: 0 none, 1 scanlines, 2 diagonal, 3 triangular, 4 wave, 5 Lottes CRT, 6 4xRGSS, 7 NxAGSS, and ours: 8 CRT-Geom, 9 CRT-Geom with glow), applied at the next vsync; the WebGPU device only (the 2D path's device has none). The page's CRT picture mode is 8, CRT 2 is 9 |
 | `pcsx2web_set_ee_cycle_rate(rate)` | the Underclock (PCSX2's EE cycle rate): 0, or -1 to -3 for the EE at 75, 60 or 50 %, applied at the next vsync or boot; other values are ignored |
 | `pcsx2web_vsync_count()` | vsyncs emulated since the module started |
 | `pcsx2web_audio_start()` | start the sound worklet in `Module.pcsx2webAudioContext` (an AudioContext the page made); it calls `Module.pcsx2webAudioReady(node)` when the node exists, or with `null` if it failed; 0 if started, -1 if a start already ran or there is no context |

@@ -35,7 +35,7 @@ Early and experimental, but games play.
   ten, the disc needs a clean first. With "reduce motion" set in your system (on Linux, GNOME's
   animations switched off), the animations are skipped.
 - **Graphics:** PCSX2's hardware renderer on WebGPU, with the software renderer as a fallback;
-  native or 2× internal resolution, and Smooth, Crisp or CRT (PCSX2's Lottes shader) pictures. The
+  native or 2× internal resolution, and Smooth, Crisp, CRT (the CRT-Geom shader, as in ShaderGlass) or CRT 2 (the same with glow and short trails) pictures. The
   picture sits in a drawn CRT television, above a drawing of the console's front.
 - **Sound:** PCSX2's sound chip emulation (SPU2) through a Web Audio worklet. Below full speed it is
   time-stretched, as in PCSX2 on the desktop. Browsers only start sound after a key press or click.

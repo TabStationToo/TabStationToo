@@ -153,7 +153,7 @@ static std::atomic<u32> s_vsync_count{0};
 
 // Crisp: nearest-neighbour presentation (WebGPU path). -1 = unchanged since the last apply.
 static std::atomic<int> s_crisp_request{-1};
-// The page's picture filter (PCSX2's TV shader, GSConfig.TVShader: 0 none, 5 Lottes CRT...), -1: no request.
+// The page's picture filter (PCSX2's TV shader, GSConfig.TVShader: 0 none, 5 Lottes CRT, 8 CRT-Geom, 9 CRT-Geom with glow...), -1: no request.
 static std::atomic<int> s_tv_shader_request{-1};
 static int s_tv_shader = 0;
 static bool s_crisp = false; // CPU thread
@@ -2287,10 +2287,10 @@ EMSCRIPTEN_KEEPALIVE void pcsx2web_set_upscale(int multiplier)
 }
 
 /// The picture filter: PCSX2's TV shader (0 none, 1 scanlines, 2 diagonal, 3 triangular, 4 wave, 5 Lottes CRT,
-/// 6 4xRGSS, 7 NxAGSS), applied at the next vsync or boot.
+/// 6 4xRGSS, 7 NxAGSS, 8 CRT-Geom, 9 CRT-Geom with glow), applied at the next vsync or boot.
 EMSCRIPTEN_KEEPALIVE void pcsx2web_set_tv_shader(int shader)
 {
-	if (shader >= 0 && shader <= 7)
+	if (shader >= 0 && shader < static_cast<int>(PresentShader::Count))
 		s_tv_shader_request.store(shader, std::memory_order_release);
 }
 

@@ -76,6 +76,10 @@ const char* ShaderEntryPoint(PresentShader value)
 		case PresentShader::LOTTES_FILTER:      return "ps_filter_lottes";
 		case PresentShader::SUPERSAMPLE_4xRGSS: return "ps_4x_rgss";
 		case PresentShader::SUPERSAMPLE_AUTO:   return "ps_automagical_supersampling";
+#ifdef __EMSCRIPTEN__
+		case PresentShader::GEOM_FILTER:        return "ps_filter_geom";
+		case PresentShader::GEOM_GLOW_FILTER:   return "ps_filter_geom_glow";
+#endif
 		// clang-format on
 		default:
 			pxAssert(0);

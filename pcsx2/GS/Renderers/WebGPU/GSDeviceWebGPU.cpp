@@ -686,6 +686,18 @@ GSDeviceWebGPU::PendingPipeline GSDeviceWebGPU::CreatePipelineAsync(const Utilit
 	blend.alpha.srcFactor = WGPUBlendFactor_One;
 	blend.alpha.dstFactor = WGPUBlendFactor_Zero;
 
+	if (key.blend == BLEND_MULTIPLY)
+	{
+		blend.color.srcFactor = blend.alpha.srcFactor = WGPUBlendFactor_Zero;
+		blend.color.dstFactor = blend.alpha.dstFactor = WGPUBlendFactor_Src;
+	}
+	else if (key.blend == BLEND_MAX)
+	{
+		blend.color.operation = blend.alpha.operation = WGPUBlendOperation_Max;
+		blend.color.srcFactor = blend.alpha.srcFactor = WGPUBlendFactor_One;
+		blend.color.dstFactor = blend.alpha.dstFactor = WGPUBlendFactor_One;
+	}
+
 	WGPUColorTargetState target = WGPU_COLOR_TARGET_STATE_INIT;
 	target.format = key.color_format;
 	target.writeMask = key.write_mask;
@@ -916,6 +928,7 @@ void GSDeviceWebGPU::Destroy()
 		m_presenting = false;
 	}
 
+	ReleaseGlowBuffers();
 	GSDevice::Destroy();
 
 	if (m_device)
@@ -1849,6 +1862,23 @@ void GSDeviceWebGPU::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, cons
 void GSDeviceWebGPU::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
 	PresentShader shader, float shaderTime, Filter filter)
 {
+	// ps_filter_geom_glow samples the texture the glow passes make, not the picture itself.
+	if (shader == PresentShader::GEOM_GLOW_FILTER)
+	{
+		GSTextureWebGPU* const glow = UpdateGlowBuffers(static_cast<GSTextureWebGPU*>(sTex), sRect, !dTex);
+		if (!glow)
+		{
+			PresentRect(sTex, sRect, dTex, dRect, PresentShader::COPY, shaderTime, filter);
+			return;
+		}
+		PresentRect(glow, GSVector4(0.0f, 0.0f, 0.5f, 1.0f), dTex, dRect, PresentShader::Count, shaderTime, Biln);
+		return;
+	}
+	if (shader == PresentShader::Count) // from above
+		shader = PresentShader::GEOM_GLOW_FILTER;
+	else if (!dTex)
+		ReleaseGlowBuffers();
+
 	DisplayConstantBuffer cb;
 	cb.SetSource(sRect, sTex->GetSize());
 	cb.SetTarget(dRect, dTex ? dTex->GetSize() : GSVector2i(static_cast<int>(m_surface_width), static_cast<int>(m_surface_height)));
@@ -1865,6 +1895,75 @@ void GSDeviceWebGPU::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSText
 	DoUtilityStretchRect(static_cast<GSTextureWebGPU*>(sTex), sRect, d, dRect,
 		GetUtilityPipeline(MakeKey(MODULE_PRESENT, ShaderEntryPoint(shader), d->GetNativeFormat())),
 		(filter == Biln) ? BindGroupKind::Linear : BindGroupKind::Point, true);
+}
+
+GSTextureWebGPU* GSDeviceWebGPU::UpdateGlowBuffers(GSTextureWebGPU* sTex, const GSVector4& sRect, bool advance)
+{
+	// As large as the displayed part of the picture, so that the accumulated picture is as sharp.
+	const GSVector2i ssize = sTex->GetSize();
+	const int w = std::clamp(static_cast<int>(std::lround((sRect.z - sRect.x) * static_cast<float>(ssize.x))), 16, 2048);
+	const int h = std::clamp(static_cast<int>(std::lround((sRect.w - sRect.y) * static_cast<float>(ssize.y))), 16, 2048);
+	if (m_glow_tex && (m_glow_tex->GetWidth() != w * 2 || m_glow_tex->GetHeight() != h))
+		ReleaseGlowBuffers();
+
+	bool created = false;
+	if (!m_glow_tex)
+	{
+		m_glow_tex = static_cast<GSTextureWebGPU*>(CreateRenderTarget(w * 2, h, GSTexture::Format::Color, true, false));
+		m_glow_blur = static_cast<GSTextureWebGPU*>(CreateRenderTarget(w, h, GSTexture::Format::Color, true, false));
+		if (!m_glow_tex || !m_glow_blur)
+		{
+			ReleaseGlowBuffers();
+			return nullptr;
+		}
+		ClearRenderTarget(m_glow_tex, 0);
+		created = true;
+	}
+	if (!advance && !created)
+		return m_glow_tex;
+
+	const WGPUTextureFormat format = m_glow_tex->GetNativeFormat();
+	const GSVector4 left(0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h));
+	const GSVector4 right(static_cast<float>(w), 0.0f, static_cast<float>(w * 2), static_cast<float>(h));
+	const GSVector4 left_uv(0.0f, 0.0f, 0.5f, 1.0f);
+	const GSVector4 full_uv(0.0f, 0.0f, 1.0f, 1.0f);
+	DisplayConstantBuffer cb;
+
+	// Accumulate: what is there fades, then takes the maximum with the new picture.
+	cb.SetSource(sRect, ssize);
+	cb.SetTarget(left, m_glow_tex->GetSize());
+	cb.SetTime(0.0f);
+	SetUtilityUniforms(&cb, sizeof(cb));
+	DoUtilityStretchRect(sTex, sRect, m_glow_tex, left,
+		GetUtilityPipeline(MakeKey(MODULE_PRESENT, "ps_glow_fade", format, TexLayout::Float, 0xf, BLEND_MULTIPLY)),
+		BindGroupKind::Linear, false);
+	DoUtilityStretchRect(sTex, sRect, m_glow_tex, left,
+		GetUtilityPipeline(MakeKey(MODULE_PRESENT, "ps_glow_feed", format, TexLayout::Float, 0xf, BLEND_MAX)),
+		BindGroupKind::Linear, false);
+
+	// Blur it: horizontally into the second texture, vertically back beside the accumulated picture.
+	cb.SetSource(left_uv, m_glow_tex->GetSize());
+	cb.SetTarget(left, m_glow_blur->GetSize());
+	cb.SetTime(2.0f * std::max(1.0f, static_cast<float>(h) / 480.0f)); // about four lines of a 480-line picture
+	SetUtilityUniforms(&cb, sizeof(cb));
+	DoUtilityStretchRect(m_glow_tex, left_uv, m_glow_blur, left,
+		GetUtilityPipeline(MakeKey(MODULE_PRESENT, "ps_glow_blur_h", format)), BindGroupKind::Linear, true);
+	cb.SetSource(full_uv, m_glow_blur->GetSize());
+	cb.SetTarget(right, m_glow_tex->GetSize());
+	SetUtilityUniforms(&cb, sizeof(cb));
+	DoUtilityStretchRect(m_glow_blur, full_uv, m_glow_tex, right,
+		GetUtilityPipeline(MakeKey(MODULE_PRESENT, "ps_glow_blur_v", format)), BindGroupKind::Linear, false);
+	return m_glow_tex;
+}
+
+void GSDeviceWebGPU::ReleaseGlowBuffers()
+{
+	if (m_glow_tex)
+		Recycle(m_glow_tex);
+	if (m_glow_blur)
+		Recycle(m_glow_blur);
+	m_glow_tex = nullptr;
+	m_glow_blur = nullptr;
 }
 
 void GSDeviceWebGPU::DrawMultiStretchRects(const MultiStretchRect* rects, u32 num_rects, GSTexture* dTex,

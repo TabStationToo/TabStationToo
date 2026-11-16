@@ -186,6 +186,8 @@ private:
 		BLEND_NONE,
 		BLEND_MERGE, ///< src alpha / one minus src alpha on colour, alpha replaced (GSDeviceVK m_merge)
 		BLEND_IMGUI, ///< the same as merge, as GSDeviceVK's ImGui pipeline
+		BLEND_MULTIPLY, ///< destination * source (the glow passes fading the accumulated picture)
+		BLEND_MAX, ///< max(destination, source) (the glow passes taking the new picture)
 	};
 
 	using PipelineRequest = WebGPUHost::RequestResult<WGPURenderPipeline>;
@@ -403,6 +405,14 @@ private:
 	std::vector<WGPUBindGroup> m_pending_release_groups;
 
 	// Presenting
+	/// The glow passes of ps_filter_geom_glow (present.wgsl): updates and returns the texture it
+	/// samples (accumulated picture | blurred), or null. advance is false for a second
+	/// picture of the same frame (a screenshot), which must not fade the accumulated one again.
+	GSTextureWebGPU* UpdateGlowBuffers(GSTextureWebGPU* sTex, const GSVector4& sRect, bool advance);
+	void ReleaseGlowBuffers();
+	GSTextureWebGPU* m_glow_tex = nullptr; ///< 2w x h: accumulated picture, then its blur
+	GSTextureWebGPU* m_glow_blur = nullptr; ///< w x h: blurred horizontally
+
 	bool m_presenting = false;
 	WGPUTexture m_present_texture = nullptr;
 	WGPUTextureView m_present_view = nullptr;

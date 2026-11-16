@@ -15,7 +15,7 @@
 //
 // Entry points (ShaderEntryPoint(PresentShader)), each writing vec4 to the swap chain format:
 //   ps_copy, ps_filter_scanlines, ps_filter_diagonal, ps_filter_triangular, ps_filter_complex,
-//   ps_filter_lottes, ps_4x_rgss, ps_automagical_supersampling
+//   ps_filter_lottes, ps_4x_rgss, ps_automagical_supersampling, and ps_filter_geom, ps_filter_geom_glow with the ps_glow_* passes (ours)
 
 struct VSOutput
 {
@@ -404,6 +404,255 @@ fn LottesCRTPass(frag_coord: vec4<f32>) -> vec4<f32>
 fn ps_filter_lottes(input: VSOutput) -> @location(0) vec4<f32>
 {
 	return LottesCRTPass(input.p);
+}
+
+// The glow passes (TabStationToo only, not in vulkan/present.glsl), for ps_filter_geom_glow
+//
+// Before it presents, the device (GSDeviceWebGPU::UpdateGlowBuffers) keeps one texture up to date: in
+// its left half the picture accumulated over frames (phosphor persistence), in its right half that
+// picture blurred. The utility layout has one texture, so the accumulation is two blended draws
+// (ps_glow_fade multiplies what is there, ps_glow_feed takes the maximum with the new picture) instead
+// of a shader reading its own previous output.
+// The scheme (accumulate, blur across, blur down) and the blur's weights are those of newpixie CRT by
+// Mattias Gustavsson (libretro slang-shaders, crt/shaders/newpixie), MIT licence, Copyright (c) 2016
+// Mattias Gustavsson, or public domain (www.unlicense.org), as one chooses. MIT: Permission is hereby
+// granted, free of charge, to any person obtaining a copy of this software and associated
+// documentation files (the "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+// sell copies of the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions: The above copyright notice and this permission notice shall be
+// included in all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS",
+// WITHOUT WARRANTY OF ANY KIND.
+
+const GlowPersistence = 0.50; // what is left of the picture one frame later
+
+@fragment
+fn ps_glow_fade(input: VSOutput) -> @location(0) vec4<f32>
+{
+	return vec4<f32>(GlowPersistence); // blended as destination * this
+}
+
+@fragment
+fn ps_glow_feed(input: VSOutput) -> @location(0) vec4<f32>
+{
+	return sample_c(input.t); // blended as max(destination, this)
+}
+
+// u_source_rect is the part of the texture to blur (taps stay inside it), u_time the step in texels.
+fn GlowBlurPass(uv: vec2<f32>, dir: vec2<f32>) -> vec4<f32>
+{
+	let d = dir * cb.u_time * cb.u_rcp_source_resolution;
+	let lo = cb.u_source_rect.xy + 0.5 * cb.u_rcp_source_resolution;
+	let hi = cb.u_source_rect.zw - 0.5 * cb.u_rcp_source_resolution;
+	var sum = textureSampleLevel(samp0_tex, samp0, uv, 0.0) * 0.2270270270;
+	sum += textureSampleLevel(samp0_tex, samp0, clamp(uv - 4.0 * d, lo, hi), 0.0) * 0.0162162162;
+	sum += textureSampleLevel(samp0_tex, samp0, clamp(uv - 3.0 * d, lo, hi), 0.0) * 0.0540540541;
+	sum += textureSampleLevel(samp0_tex, samp0, clamp(uv - 2.0 * d, lo, hi), 0.0) * 0.1216216216;
+	sum += textureSampleLevel(samp0_tex, samp0, clamp(uv - 1.0 * d, lo, hi), 0.0) * 0.1945945946;
+	sum += textureSampleLevel(samp0_tex, samp0, clamp(uv + 1.0 * d, lo, hi), 0.0) * 0.1945945946;
+	sum += textureSampleLevel(samp0_tex, samp0, clamp(uv + 2.0 * d, lo, hi), 0.0) * 0.1216216216;
+	sum += textureSampleLevel(samp0_tex, samp0, clamp(uv + 3.0 * d, lo, hi), 0.0) * 0.0540540541;
+	sum += textureSampleLevel(samp0_tex, samp0, clamp(uv + 4.0 * d, lo, hi), 0.0) * 0.0162162162;
+	return sum;
+}
+
+@fragment
+fn ps_glow_blur_h(input: VSOutput) -> @location(0) vec4<f32>
+{
+	return GlowBlurPass(input.t, vec2<f32>(1.0, 0.0));
+}
+
+@fragment
+fn ps_glow_blur_v(input: VSOutput) -> @location(0) vec4<f32>
+{
+	return GlowBlurPass(input.t, vec2<f32>(0.0, 1.0));
+}
+
+// ps_filter_geom and ps_filter_geom_glow (TabStationToo only, not in vulkan/present.glsl)
+//
+// CRT-Geom ("CRT-interlaced"), Copyright (C) 2010-2012 cgwg, Themaister and DOLLS, from libretro
+// slang-shaders (crt/shaders/crt-geom.slang). This program is free software; you can redistribute it
+// and/or modify it under the terms of the GNU General Public License as published by the Free Software
+// Foundation; either version 2 of the License, or (at your option) any later version.
+//
+// A picture on a spherical tube seen from a distance, with a beam per scanline (wider where it is
+// bright), Lanczos filtering along the line, rounded corners and an aperture mask. Ported with the
+// slang's default parameters, and with these differences:
+//   - no tilt (x_tilt, y_tilt are 0 by default), which makes the sphere maths much shorter;
+//   - the aspect is the 4:3 the original shader meant, (1.0, 0.75);
+//   - the scanlines are the PS2's lines in pairs, as the slang's interlacing detection gives for a
+//     picture of 400 lines or more, whatever the internal resolution; the two fields do not alternate
+//     (the slang shows one per frame, which beats against a display that is not at the game's rate);
+//   - only the default mask (1: magenta and green columns), whose arithmetic reduces, with no
+//     brightness boost, to dimming the phosphors a column does not light.
+// ps_filter_geom_glow is ours on top of it: the same tube reading the glow passes' texture, so that
+// bright things leave a short trail, with the blurred picture added as light spread by the glass, and
+// the corners a little darker.
+
+const GeomCRTGamma = 2.4;
+const GeomMonitorGamma = 2.2;
+const GeomD = 1.5;               // "Distance"
+const GeomR = 2.0;               // "Curvature Radius"
+const GeomCornerSize = 0.03;
+const GeomCornerSmooth = 1000.0;
+const GeomDotMask = 0.3;         // "Mask strength"
+const GeomScanlineWeight = 0.3;
+const GeomLum = 0.0;             // "Luminance"
+const GeomAspect = vec2<f32>(1.0, 0.75);
+const GeomPi = 3.141592653589;
+const GeomGlow = 0.12;     // ps_filter_geom_glow: how much of the blurred picture's highlights is added
+const GeomVignette = 0.18; // and how much darker the corners get
+
+fn GeomIntersect(xy: vec2<f32>) -> f32
+{
+	let A = dot(xy, xy) + GeomD * GeomD;
+	let B = 2.0 * (GeomR * (-GeomD) - GeomD * GeomD);
+	let C = GeomD * GeomD + 2.0 * GeomR * GeomD;
+	return (-B - sqrt(B * B - 4.0 * A * C)) / (2.0 * A);
+}
+
+fn GeomBkwtrans(xy: vec2<f32>) -> vec2<f32>
+{
+	let c = GeomIntersect(xy);
+	let point = vec2<f32>(c, c) * xy / GeomR;
+	let a = sqrt(max(1.0 - dot(point, point), 0.0));
+	let r = max(abs(GeomR * acos(a)), 1e-5);
+	return point * r / sin(r / GeomR);
+}
+
+fn GeomFwtrans(uv_in: vec2<f32>) -> vec2<f32>
+{
+	let r = max(abs(sqrt(dot(uv_in, uv_in))), 1e-5);
+	let uv = uv_in * sin(r / GeomR) / r;
+	let x = 1.0 - cos(r / GeomR);
+	let D = GeomD / GeomR + x;
+	return GeomD * uv / D;
+}
+
+// The slang's maxscale(): with no tilt its centre is (0, 0) and only the scale is left.
+fn GeomMaxScale() -> f32
+{
+	let a = vec2<f32>(0.5, 0.5) * GeomAspect;
+	let hi = vec2<f32>(GeomFwtrans(vec2<f32>(a.x, 0.0)).x, GeomFwtrans(vec2<f32>(0.0, a.y)).y) / GeomAspect;
+	return 2.0 * max(hi.x, hi.y);
+}
+
+fn GeomTransform(coord: vec2<f32>) -> vec2<f32>
+{
+	let c = (coord - vec2<f32>(0.5, 0.5)) * GeomAspect * GeomMaxScale();
+	return GeomBkwtrans(c) / GeomAspect + vec2<f32>(0.5, 0.5);
+}
+
+fn GeomCorner(coord_in: vec2<f32>) -> f32
+{
+	var coord = min(coord_in, vec2<f32>(1.0) - coord_in) * GeomAspect;
+	let cdist = vec2<f32>(GeomCornerSize);
+	coord = cdist - min(coord, cdist);
+	let dist = sqrt(dot(coord, coord));
+	return saturate((cdist.x - dist) * GeomCornerSmooth);
+}
+
+// The influence of a scanline of colour `color` at `distance` scanlines from its centre.
+fn GeomScanlineWeights(distance: f32, color: vec3<f32>) -> vec3<f32>
+{
+	let wid = 2.0 + 2.0 * pow(color, vec3<f32>(4.0));
+	let weights = vec3<f32>(distance / GeomScanlineWeight);
+	return (GeomLum + 1.4) * exp(-pow(weights * inverseSqrt(0.5 * wid), wid)) / (0.6 + 0.2 * wid);
+}
+
+// The picture at xy (0..1 over the displayed picture) in linear light.
+fn GeomTex(xy: vec2<f32>) -> vec3<f32>
+{
+	let half_texel = 0.5 * cb.u_rcp_source_resolution;
+	let st = clamp(mix(cb.u_source_rect.xy, cb.u_source_rect.zw, xy), cb.u_source_rect.xy + half_texel, cb.u_source_rect.zw - half_texel);
+	return pow(textureSampleLevel(samp0_tex, samp0, st, 0.0).rgb, vec3<f32>(GeomCRTGamma));
+}
+
+// The blurred picture beside the one u_source_rect names (the glow passes' texture), in linear light.
+fn GeomTexGlow(xy: vec2<f32>) -> vec3<f32>
+{
+	let half_texel = 0.5 * cb.u_rcp_source_resolution;
+	var st = clamp(mix(cb.u_source_rect.xy, cb.u_source_rect.zw, xy), cb.u_source_rect.xy + half_texel, cb.u_source_rect.zw - half_texel);
+	st.x += cb.u_source_rect.z - cb.u_source_rect.x;
+	return pow(textureSampleLevel(samp0_tex, samp0, st, 0.0).rgb, vec3<f32>(GeomCRTGamma));
+}
+
+fn GeomPass(frag_coord: vec4<f32>, glow: bool) -> vec4<f32>
+{
+	let px = frag_coord.xy - cb.u_target_rect.xy;
+	let vtc = px / cb.u_target_size;
+
+	var xy = GeomTransform(vtc);
+	let cval = GeomCorner(xy);
+	let glass_xy = xy;
+
+	// The scanlines: the PS2's lines (the source is a multiple of them when upscaled), in pairs.
+	let src_h = cb.u_source_size.y;
+	let ps2_lines = src_h / max(1.0, round(src_h / 480.0));
+	let ilfac = clamp(floor(ps2_lines / 200.0), 1.0, 2.0);
+	let tsize = vec2<f32>(cb.u_source_size.x, ps2_lines / ilfac);
+	let one = vec2<f32>(1.0) / tsize;
+
+	let ratio_scale = xy * tsize - vec2<f32>(0.5, 0.5);
+	var uv_ratio = fract(ratio_scale);
+	let filter_ = fwidth(ratio_scale.y);
+
+	// Snap to the centre of the underlying texel.
+	xy = (floor(ratio_scale) + vec2<f32>(0.5, 0.5)) / tsize;
+
+	// Lanczos2 coefficients for the neighbours along the scanline.
+	var coeffs = GeomPi * vec4<f32>(1.0 + uv_ratio.x, uv_ratio.x, 1.0 - uv_ratio.x, 2.0 - uv_ratio.x);
+	coeffs = max(abs(coeffs), vec4<f32>(1e-5));
+	coeffs = 2.0 * sin(coeffs) * sin(coeffs / 2.0) / (coeffs * coeffs);
+	coeffs /= dot(coeffs, vec4<f32>(1.0));
+
+	// The colour of the current and the next scanline at this pixel's horizontal position.
+	let col = saturate(GeomTex(xy + vec2<f32>(-one.x, 0.0)) * coeffs.x + GeomTex(xy) * coeffs.y +
+		GeomTex(xy + vec2<f32>(one.x, 0.0)) * coeffs.z + GeomTex(xy + vec2<f32>(2.0 * one.x, 0.0)) * coeffs.w);
+	let col2 = saturate(GeomTex(xy + vec2<f32>(-one.x, one.y)) * coeffs.x + GeomTex(xy + vec2<f32>(0.0, one.y)) * coeffs.y +
+		GeomTex(xy + one) * coeffs.z + GeomTex(xy + vec2<f32>(2.0 * one.x, one.y)) * coeffs.w);
+
+	// Their influence on this pixel, the beam profile oversampled three times (against moire).
+	var weights = GeomScanlineWeights(uv_ratio.y, col);
+	var weights2 = GeomScanlineWeights(1.0 - uv_ratio.y, col2);
+	uv_ratio.y = uv_ratio.y + 1.0 / 3.0 * filter_;
+	weights = (weights + GeomScanlineWeights(uv_ratio.y, col)) / 3.0;
+	weights2 = (weights2 + GeomScanlineWeights(abs(1.0 - uv_ratio.y), col2)) / 3.0;
+	uv_ratio.y = uv_ratio.y - 2.0 / 3.0 * filter_;
+	weights = weights + GeomScanlineWeights(abs(uv_ratio.y), col) / 3.0;
+	weights2 = weights2 + GeomScanlineWeights(abs(1.0 - uv_ratio.y), col2) / 3.0;
+
+	let mul_res = (col * weights + col2 * weights2) * cval;
+
+	// The mask: magenta and green columns.
+	let green = floor(px.x % 2.0);
+	let mask = mix(vec3<f32>(1.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), green);
+	var cout = mix((1.0 - GeomDotMask) * mul_res, mul_res, mask);
+
+	if (glow)
+	{
+		// Light spread by the glass: over the scanlines and the mask, not under them.
+		// Only what is bright glows: adding the whole blurred picture lifts the dark parts into a fog.
+		let g = GeomTexGlow(glass_xy);
+		let bright = smoothstep(0.08, 0.5, dot(g, vec3<f32>(0.299, 0.587, 0.114)));
+		cout += g * bright * GeomGlow * cval;
+		let v = 16.0 * glass_xy.x * glass_xy.y * (1.0 - glass_xy.x) * (1.0 - glass_xy.y);
+		cout *= mix(1.0 - GeomVignette, 1.0, sqrt(saturate(v)));
+	}
+
+	return vec4<f32>(pow(saturate(cout), vec3<f32>(1.0 / GeomMonitorGamma)), 1.0);
+}
+
+@fragment
+fn ps_filter_geom(input: VSOutput) -> @location(0) vec4<f32>
+{
+	return GeomPass(input.p, false);
+}
+
+@fragment
+fn ps_filter_geom_glow(input: VSOutput) -> @location(0) vec4<f32>
+{
+	return GeomPass(input.p, true);
 }
 
 @fragment

@@ -486,6 +486,14 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
       <label class="gfx-option"><input type="radio" name="gfx-scale" value="2"><span>2×<span class="gfx-hint">Twice the lines; needs a stronger GPU</span></span></label>
       <p class="menu-reason" id="gfx-scale-note">Remembered in this browser. Applies at once.</p>
     </fieldset>
+    <fieldset class="gfx-choice" aria-describedby="gfx-picture-note">
+      <legend class="sound-label">Picture</legend>
+      <label class="gfx-option"><input type="radio" name="gfx-picture" value="smooth" checked><span>Smooth<span class="gfx-hint">Soft edges</span></span></label>
+      <label class="gfx-option"><input type="radio" name="gfx-picture" value="crisp"><span>Crisp<span class="gfx-hint">Hard pixels</span></span></label>
+      <label class="gfx-option"><input type="radio" name="gfx-picture" value="crt"><span>CRT<span class="gfx-hint">Curved tube, scanlines</span></span></label>
+      <label class="gfx-option"><input type="radio" name="gfx-picture" value="crt2"><span>CRT 2<span class="gfx-hint">The same with glow and trails</span></span></label>
+      <p class="menu-reason" id="gfx-picture-note">Remembered in this browser. Applies at once.</p>
+    </fieldset>
     <div class="menu-items">
       <button type="button" class="menu-item" id="gfx-check"><svg class="icon" aria-hidden="true" focusable="false"><use href="icons.svg#i-graphics-card"/></svg>Check WebGPU</button>
       <div class="gfx-result" id="gfx-result" role="status" aria-live="polite"></div>

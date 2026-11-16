@@ -35,11 +35,19 @@
 
 static void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename);
 
+#ifdef __EMSCRIPTEN__
+static constexpr std::array<PresentShader, 10> s_tv_shader_indices = {
+#else
 static constexpr std::array<PresentShader, 8> s_tv_shader_indices = {
+#endif
 	PresentShader::COPY, PresentShader::SCANLINE,
 	PresentShader::DIAGONAL_FILTER, PresentShader::TRIANGULAR_FILTER,
 	PresentShader::COMPLEX_FILTER, PresentShader::LOTTES_FILTER,
-	PresentShader::SUPERSAMPLE_4xRGSS, PresentShader::SUPERSAMPLE_AUTO};
+	PresentShader::SUPERSAMPLE_4xRGSS, PresentShader::SUPERSAMPLE_AUTO,
+#ifdef __EMSCRIPTEN__
+	PresentShader::GEOM_FILTER, PresentShader::GEOM_GLOW_FILTER,
+#endif
+};
 
 static std::deque<std::thread> s_screenshot_threads;
 static std::mutex s_screenshot_threads_mutex;

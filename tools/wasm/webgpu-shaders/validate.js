@@ -110,7 +110,7 @@ function buildCases() {
 
 	// present.wgsl
 	for (const fs of ["ps_copy", "ps_filter_scanlines", "ps_filter_diagonal", "ps_filter_triangular", "ps_filter_complex",
-		"ps_filter_lottes", "ps_4x_rgss", "ps_automagical_supersampling"]) {
+		"ps_filter_lottes", "ps_filter_geom", "ps_filter_geom_glow", "ps_glow_fade", "ps_glow_feed", "ps_glow_blur_h", "ps_glow_blur_v", "ps_4x_rgss", "ps_automagical_supersampling"]) {
 		add({ file: "present", fs, targets: [color(F.Present)] });
 	}
 

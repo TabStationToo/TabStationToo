@@ -79,6 +79,10 @@ enum class PresentShader
 	LOTTES_FILTER,
 	SUPERSAMPLE_4xRGSS,
 	SUPERSAMPLE_AUTO,
+#ifdef __EMSCRIPTEN__
+	GEOM_FILTER, // TV shaders 8 and 9: the WebGPU device only (present.wgsl)
+	GEOM_GLOW_FILTER,
+#endif
 	Count
 };
 

@@ -8549,6 +8549,8 @@
 		radios: [...document.querySelectorAll('input[name="gfx-choice"]')],
 		scaleRadios: [...document.querySelectorAll('input[name="gfx-scale"]')],
 		scaleNote: $('gfx-scale-note'),
+		pictureRadios: [...document.querySelectorAll('input[name="gfx-picture"]')],
+		pictureNote: $('gfx-picture-note'),
 	};
 	// The HW renderer's one hard requirement, then the features it uses when they are there
 	// (GSDeviceWebGPU::CreateInstanceAndDevice()).
@@ -8625,6 +8627,15 @@
 		// Only the GPU renderer draws above native; the software renderer ignores it.
 		gfxEls.scaleNote.textContent = gpu.mode && !gpu.mode.hw ?
 			'Only the GPU renderer draws at 2×; this picture is drawn in software. Remembered in this browser.' :
+			'Remembered in this browser. Applies at once.';
+		// The CRT pictures are shaders of the WebGPU device; the 2D canvas has none.
+		const noShaders = display.kind === '2d';
+		for (const r of gfxEls.pictureRadios) {
+			r.checked = r.value === page.picture;
+			r.disabled = noShaders && PICTURE_MODES[r.value].shader !== 0;
+		}
+		gfxEls.pictureNote.textContent = noShaders ?
+			'CRT needs WebGPU graphics; this picture is on a 2D canvas. Remembered in this browser.' :
 			'Remembered in this browser. Applies at once.';
 	}
 
@@ -8725,6 +8736,15 @@
 					api.setUpscale(page.upscale);
 				pageLog(`Graphics resolution: ${page.upscale === 2 ? '2×' : 'native'}.`);
 				renderGfx();
+			});
+		}
+		for (const r of gfxEls.pictureRadios) {
+			r.addEventListener('change', () => {
+				if (!r.checked)
+					return;
+				setPicture(r.value);
+				writePref(PREF_PICTURE, r.value);
+				subtitle(`Picture: ${PICTURE_MODES[r.value].name}.`);
 			});
 		}
 		gfxEls.check.addEventListener('click', checkWebGPU);
@@ -9547,12 +9567,15 @@
 			api.setCrisp(on);
 	}
 
-	// The remote's PICTURE button cycles the picture modes. CRT is PCSX2's own Lottes CRT shader (its TV shader 5,
-	// applied when the WebGPU device presents); the 2D path's device has no TV shaders, so there it is left out.
+	// The remote's PICTURE button cycles the picture modes. CRT is the CRT-Geom shader as in ShaderGlass (TV shader 8: a
+	// spherical tube, a beam per scanline, an aperture mask) and CRT 2 the same with glow, short trails and darker corners
+	// (TV shader 9), both applied when the WebGPU device presents; the 2D path's device has no TV shaders, so there they
+	// are left out.
 	const PICTURE_MODES = {
 		smooth: { name: 'Smooth', crisp: false, shader: 0, next: 'crisp' },
 		crisp: { name: 'Crisp', crisp: true, shader: 0, next: 'crt' },
-		crt: { name: 'CRT', crisp: false, shader: 5, next: 'smooth' },
+		crt: { name: 'CRT', crisp: false, shader: 8, next: 'crt2' },
+		crt2: { name: 'CRT 2', crisp: false, shader: 9, next: 'smooth' },
 	};
 
 	function readPicturePref() {
@@ -9571,6 +9594,8 @@
 		els.btnCrisp.classList.toggle('on', mode !== 'smooth');
 		if (api)
 			api.setTvShader(m.shader);
+		for (const r of gfxEls.pictureRadios)
+			r.checked = r.value === mode;
 	}
 
 	// ------------------------------------------------------------------ fullscreen
@@ -10837,9 +10862,9 @@
 
 		els.btnCrisp.addEventListener('click', (e) => {
 			let next = PICTURE_MODES[page.picture].next;
-			const noCrt = next === 'crt' && display.kind === '2d';
-			if (noCrt)
-				next = PICTURE_MODES.crt.next;
+			const noCrt = PICTURE_MODES[next].shader !== 0 && display.kind === '2d';
+			while (PICTURE_MODES[next].shader !== 0 && display.kind === '2d')
+				next = PICTURE_MODES[next].next;
 			setPicture(next);
 			writePref(PREF_PICTURE, next);
 			subtitle(`Picture: ${PICTURE_MODES[next].name}.${noCrt ? ' CRT needs WebGPU graphics (Menu).' : ''}`);
