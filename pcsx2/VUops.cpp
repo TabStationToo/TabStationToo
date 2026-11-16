@@ -308,12 +308,16 @@ __fi void _vuTestUpperStalls(VURegs* VU, _VURegsNum* VUregsn)
 
 __fi void _vuTestLowerStalls(VURegs* VU, _VURegsNum* VUregsn)
 {
+	// The IALU pipe holds the ILW/ILWR results (4 cycles): every lower op that reads one of those VI waits for it,
+	// not only branches, as in microVU. Without it, code that relies on the stall reads Q (or P) before the DIV
+	// (or EFU op) it waits for has finished: Ben 10 - Alien Force's 3D projected its vertices with the previous
+	// vertex's 1/w.
+	_vuTestALUStalls(VU, VUregsn);
 	switch (VUregsn->pipe)
 	{
 		case VUPIPE_FMAC: _vuTestFMACStalls(VU, VUregsn); break;
 		case VUPIPE_FDIV: _vuTestFDIVStalls(VU, VUregsn); break;
 		case VUPIPE_EFU:  _vuTestEFUStalls(VU, VUregsn); break;
-		case VUPIPE_BRANCH: _vuTestALUStalls(VU, VUregsn); break;
 	}
 }
 
