@@ -71,6 +71,8 @@
 #include "pcsx2/SIO/Pad/Pad.h"
 #include "pcsx2/SIO/Pad/PadBase.h"
 #include "pcsx2/SIO/Sio.h"
+#include "pcsx2/USB/USB.h"
+#include "pcsx2/USB/usb-pad/usb-pad.h"
 #include "pcsx2/VMManager.h"
 #include "pcsx2/wasm/PerfCounters.h"
 #include "pcsx2/wasm/EEJit.h"
@@ -287,6 +289,79 @@ static bool s_pad_bind_index_ready = false;
 // light is on.
 static constexpr u32 PAD_SNAPSHOT_WORDS = (NUM_PAD_INPUTS + 3) / 4 + 1;
 static std::atomic<u32> s_pad_snapshot[NUM_PAD_PORTS][PAD_SNAPSHOT_WORDS];
+
+// Racing wheels: each of the PS2's two USB ports can hold one of PCSX2's emulated Logitech wheels (USB/usb-pad:
+// Driving Force, Driving Force Pro, Driving Force Pro rev 11.02, GT Force; the core's subtype numbers), picked by the
+// page with pcsx2web_set_wheel(), next to the two pads. It is for a real Logitech wheel that understands the classic
+// force feedback commands: the game's commands go out raw through the FFB ring (pcsx2web_ffb_ring) and the page sends
+// them to that port's wheel with WebHID; the wheel's steering, pedals and buttons come back through pcsx2web_wheel().
+static constexpr u32 NUM_WHEEL_PORTS = USB::NUM_PORTS;
+static constexpr int WHEEL_NONE = -1;
+static constexpr int WHEEL_NO_REQUEST = -2;
+static constexpr int NUM_WHEEL_TYPES = 4;
+static std::atomic<int> s_wheel_request[NUM_WHEEL_PORTS] = {WHEEL_NO_REQUEST, WHEEL_NO_REQUEST};
+static int s_wheel_type[NUM_WHEEL_PORTS] = {WHEEL_NONE, WHEEL_NONE}; // CPU thread
+
+// The FFB ring: one producer (the CPU thread, in the wheel's USB output handler), one consumer (the page). Words: 0
+// head (commands written), 1 tail (commands the page took), 2 commands dropped because the ring was full, 3 the
+// ring's size in commands, then two words per command: its first 7 bytes, and the USB port in the 8th.
+static constexpr u32 FFB_RING_SIZE = 256;
+static constexpr u32 FFB_RING_HEADER_WORDS = 4;
+alignas(16) static std::atomic<u32> s_ffb_ring[FFB_RING_HEADER_WORDS + FFB_RING_SIZE * 2] = {};
+static_assert((FFB_RING_SIZE & (FFB_RING_SIZE - 1)) == 0);
+
+// Wheel input: the same single producer (browser main thread) and consumer (CPU thread) as the pads. Each entry:
+// value 0..65535 in bits 0-15, the wheel's bind index (usb_pad::ControlID) in bits 16-23, the USB port in bit 24.
+static constexpr u32 WHEEL_QUEUE_SIZE = 512;
+static constexpr u32 WHEEL_EVENT_BIND_SHIFT = 16;
+static constexpr u32 WHEEL_EVENT_PORT_SHIFT = 24;
+static u32 s_wheel_queue[WHEEL_QUEUE_SIZE];
+static std::atomic<u32> s_wheel_queue_head{0}; // written by the producer
+static std::atomic<u32> s_wheel_queue_tail{0}; // written by the consumer
+static_assert((WHEEL_QUEUE_SIZE & (WHEEL_QUEUE_SIZE - 1)) == 0);
+
+// A USB port: nothing, or the core's wheel device ("Pad") with the given subtype. No bindings: the page feeds the
+// wheel (ProcessWheelEvents), and no force feedback device: the page passes the commands to the real wheel.
+static void ConfigureWheel(SettingsInterface& si, u32 port, int type)
+{
+	USB::ClearPortBindings(si, port); // the old device's
+	if (type == WHEEL_NONE)
+	{
+		USB::SetConfigDevice(si, port, "None");
+		return;
+	}
+
+	USB::SetConfigDevice(si, port, "Pad");
+	USB::SetConfigSubType(si, port, "Pad", static_cast<u32>(type));
+	USB::ClearPortBindings(si, port); // the new one's
+	si.DeleteValue(USB::GetConfigSection(port).c_str(), USB::GetConfigSubKey("Pad", "FFDevice").c_str());
+}
+
+// CPU thread (usb_pad::SetRawFFBHandler): queues a force feedback command the game sent to the emulated wheel. A
+// full ring drops the command and counts it; the page drains the ring every few milliseconds.
+static void QueueWheelFFBCommand(u32 port, const u8* data, int len)
+{
+	if (len <= 0)
+		return;
+
+	const u32 head = s_ffb_ring[0].load(std::memory_order_relaxed);
+	const u32 tail = s_ffb_ring[1].load(std::memory_order_acquire);
+	if (head - tail >= FFB_RING_SIZE)
+	{
+		s_ffb_ring[2].fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+
+	u8 bytes[8] = {};
+	std::memcpy(bytes, data, std::min(len, 7));
+	bytes[7] = static_cast<u8>(port);
+	u32 words[2];
+	std::memcpy(words, bytes, sizeof(words));
+	const u32 slot = FFB_RING_HEADER_WORDS + (head % FFB_RING_SIZE) * 2;
+	s_ffb_ring[slot].store(words[0], std::memory_order_relaxed);
+	s_ffb_ring[slot + 1].store(words[1], std::memory_order_relaxed);
+	s_ffb_ring[0].store(head + 1, std::memory_order_release);
+}
 
 //////////////////////////////////////////////////////////////////////////
 // Discs, game details and memory cards
@@ -1544,6 +1619,10 @@ static bool InitializeConfig()
 	si.SetBoolValue("InputSources", "SDL", false);
 	si.SetBoolValue("InputSources", "XInput", false);
 	ConfigurePads(si);
+	for (u32 port = 0; port < NUM_WHEEL_PORTS; port++)
+		ConfigureWheel(si, port, WHEEL_NONE);
+	s_ffb_ring[3].store(FFB_RING_SIZE, std::memory_order_relaxed);
+	usb_pad::SetRawFFBHandler(&QueueWheelFFBCommand);
 	si.ClearSection("Hotkeys");
 	ConfigureMemoryCards(si);
 
@@ -1705,6 +1784,30 @@ static void CheckCrispRequest(bool apply_now)
 		ApplyCrispSetting(request != 0, apply_now);
 }
 
+// Plugs the page's wheel choices into the USB ports (a running game sees the old device unplugged and the new one
+// plugged in). CPU thread.
+static void CheckWheelRequest(bool apply_now)
+{
+	bool changed = false;
+	for (u32 port = 0; port < NUM_WHEEL_PORTS; port++)
+	{
+		const int request = s_wheel_request[port].exchange(WHEEL_NO_REQUEST, std::memory_order_acq_rel);
+		if (request == WHEEL_NO_REQUEST || request == s_wheel_type[port])
+			continue;
+
+		s_wheel_type[port] = request;
+		{
+			auto lock = Host::GetSettingsLock();
+			ConfigureWheel(s_settings_interface, port, request);
+		}
+		INFO_LOG("pcsx2-wasm: USB port {}: {}", port + 1,
+			request == WHEEL_NONE ? "none" : USB::GetDeviceSubtypeName("Pad", static_cast<u32>(request)));
+		changed = true;
+	}
+	if (changed && apply_now && VMManager::HasValidVM())
+		VMManager::ApplySettings();
+}
+
 // The internal resolution: the hardware renderer draws at this multiple of the PS2's own size (the GS clamps it to
 // what the device's largest texture allows; the software renderer ignores it). Needs proper testing on more games.
 static void CheckUpscaleRequest(bool apply_now)
@@ -1849,6 +1952,24 @@ static void ProcessPadEvents()
 	PublishPadSnapshot();
 }
 
+// CPU thread: hands the page's wheel inputs to the emulated wheel (what a PCSX2 binding does). Values that arrive
+// while no wheel is plugged in are dropped.
+static void ProcessWheelEvents()
+{
+	const u32 head = s_wheel_queue_head.load(std::memory_order_acquire);
+	u32 tail = s_wheel_queue_tail.load(std::memory_order_relaxed);
+	const bool running = VMManager::HasValidVM();
+	for (; tail != head; tail++)
+	{
+		const u32 event = s_wheel_queue[tail % WHEEL_QUEUE_SIZE];
+		const u32 port = (event >> WHEEL_EVENT_PORT_SHIFT) & 1;
+		if (running && s_wheel_type[port] != WHEEL_NONE)
+			USB::SetDeviceBindValue(port, (event >> WHEEL_EVENT_BIND_SHIFT) & 0xFF,
+				static_cast<float>(event & 0xFFFF) / 65535.0f);
+	}
+	s_wheel_queue_tail.store(tail, std::memory_order_release);
+}
+
 static void ProcessKeyEvents()
 {
 	s_key_poll_count++;
@@ -1888,11 +2009,13 @@ static void ProcessKeyEvents()
 	}
 
 	ProcessPadEvents();
+	ProcessWheelEvents();
 }
 
 static void DiscardKeyEvents()
 {
 	s_key_queue_tail.store(s_key_queue_head.load(std::memory_order_acquire), std::memory_order_release);
+	s_wheel_queue_tail.store(s_wheel_queue_head.load(std::memory_order_acquire), std::memory_order_release);
 	s_pad_queue_tail.store(s_pad_queue_head.load(std::memory_order_acquire), std::memory_order_release);
 	std::memset(s_pad_slots, 0, sizeof(s_pad_slots));
 	std::fill(std::begin(s_keys), std::end(s_keys), KeySlot{});
@@ -1967,6 +2090,7 @@ static void RunVM(const std::string& bios_name)
 		s_settings_interface.SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", s_vu1jit_enabled.load(std::memory_order_acquire));
 	}
 	CheckCrispRequest(false);
+	CheckWheelRequest(false);
 	CheckUpscaleRequest(false);
 	CheckTvShaderRequest(false);
 	CheckCycleRateRequest(false);
@@ -2239,6 +2363,42 @@ EMSCRIPTEN_KEEPALIVE int pcsx2web_pad(int port, int input, float value)
 	return 1;
 }
 
+/// Plugs an emulated Logitech wheel into USB port 0 or 1, by the core's subtype: 0 Driving Force, 1 Driving Force
+/// Pro, 2 Driving Force Pro (rev 11.02), 3 GT Force; -1 unplugs it. Applied at the next vsync or boot.
+EMSCRIPTEN_KEEPALIVE void pcsx2web_set_wheel(int port, int type)
+{
+	if (port >= 0 && static_cast<u32>(port) < NUM_WHEEL_PORTS && type >= WHEEL_NONE && type < NUM_WHEEL_TYPES)
+		s_wheel_request[port].store(type, std::memory_order_release);
+}
+
+/// Queues the state of one input of the emulated wheel on USB port 0 or 1 for the CPU thread, by its bind index
+/// (usb_pad::ControlID: 0 steering left, 1 steering right, 2 throttle, 3 brake, 4-7 D-pad up, down, left, right, 8
+/// onwards the wheel's buttons) and a value 0 to 1 (a button: pressed from 0.5). 1 if queued, 0 if the queue is full
+/// or the arguments are invalid.
+EMSCRIPTEN_KEEPALIVE int pcsx2web_wheel(int port, int bind, float value)
+{
+	if (port < 0 || static_cast<u32>(port) >= NUM_WHEEL_PORTS || bind < 0 || bind >= usb_pad::CID_COUNT)
+		return 0;
+
+	const u32 quantized = static_cast<u32>(std::lround(std::clamp(value, 0.0f, 1.0f) * 65535.0f));
+	const u32 head = s_wheel_queue_head.load(std::memory_order_relaxed);
+	const u32 tail = s_wheel_queue_tail.load(std::memory_order_acquire);
+	if (head - tail >= WHEEL_QUEUE_SIZE)
+		return 0;
+
+	s_wheel_queue[head % WHEEL_QUEUE_SIZE] = quantized | (static_cast<u32>(bind) << WHEEL_EVENT_BIND_SHIFT) |
+	                                         (static_cast<u32>(port) << WHEEL_EVENT_PORT_SHIFT);
+	s_wheel_queue_head.store(head + 1, std::memory_order_release);
+	return 1;
+}
+
+/// The FFB ring (see s_ffb_ring): the game's raw force feedback commands to the emulated wheel. The page reads the
+/// head with Atomics, copies the commands up to it and then stores the tail (word 1). Never blocks.
+EMSCRIPTEN_KEEPALIVE const unsigned int* pcsx2web_ffb_ring(void)
+{
+	return reinterpret_cast<const unsigned int*>(s_ffb_ring);
+}
+
 /// Test hook: what the pad on port 0 or 1 holds, as the raw value (0..255) of each input in the order of
 /// pcsx2web_pad_input, four to a word (the first in the low byte), then a word with bit 0 set while the
 /// pad is connected and bit 1 while its analog light is on. Null for a bad port.
@@ -2438,6 +2598,7 @@ void Host::PumpMessagesOnCPUThread()
 	RunCPUThreadQueue();
 	CheckStopRequest();
 	CheckCrispRequest(true);
+	CheckWheelRequest(true);
 	CheckUpscaleRequest(true);
 	CheckTvShaderRequest(true);
 	CheckCycleRateRequest(true);

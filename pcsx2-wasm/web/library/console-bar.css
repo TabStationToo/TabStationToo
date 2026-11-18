@@ -78,6 +78,8 @@ body[data-drawer="keys"] .remote {
 .ps2bar .bar-port { left: 5%; top: 71.67%; width: 13%; height: 15%; }
 .ps2bar #port-2 { left: 25%; }
 .ps2bar .bar-plate { left: 41.2%; top: 36.67%; width: 9.2%; height: 11.67%; }
+.ps2bar .bar-usb { left: 41.6%; top: 66.67%; width: 4%; height: 21.67%; }
+.ps2bar #usb-2 { left: 46.2%; }
 .ps2bar .bar-tray { left: 52.4%; top: 33.33%; width: 38%; height: 36.67%; }
 .ps2bar .bar-reset { left: 92.8%; top: 28.33%; width: 4.4%; height: 28.33%; }
 .ps2bar .bar-eject { left: 92.8%; top: 65%; width: 4.4%; height: 28.33%; }
@@ -183,6 +185,24 @@ body:is([data-state="starting"], [data-state="running"]) .bar-led {
   .ps2bar .bar-hot:is(:hover, :focus-visible) .tip {
     display: block;
   }
+}
+
+/* A plug in a USB port while a wheel is plugged in there. */
+.ps2bar .usb-plug {
+  display: none;
+  width: 62%;
+  height: 34%;
+  border-radius: 1px;
+  background: var(--ink-2);
+  box-shadow: 0 0 0 1px #000;
+}
+
+.ps2bar .bar-usb[data-plugged="true"] .usb-plug {
+  display: block;
+}
+
+.ps2bar .bar-usb[data-wheel="true"] .usb-plug {
+  background: var(--amber);
 }
 
 /* ---------------------------------------------------------------- memory cards in their slots */

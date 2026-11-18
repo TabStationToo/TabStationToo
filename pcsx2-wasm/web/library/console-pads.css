@@ -365,6 +365,33 @@ body[data-chrome="hidden"] .cables {
   margin: 4px 0 0 -12px;
 }
 
+/* ---------------------------------------------------------------- the racing wheels on the USB ports (wheel.js) */
+
+.wheels {
+  /* The cables come down between or beside the controllers: no loops to hold above. */
+  padding-top: 8px;
+}
+
+.wheel-unit .p-name { text-anchor: middle; }
+
+/* The rim turns with the steering that plays it. */
+.wheel-unit .w-rotor {
+  transform-box: view-box;
+  transform-origin: 200px 155px;
+  transform: rotate(var(--steer, 0deg));
+}
+
+.wheel-unit .w-hole { fill: #151413; }
+
+/* The rim's top mark, to see the steering. */
+.wheel-unit .w-mark { fill: none; stroke: var(--amber); stroke-width: 4; stroke-linecap: round; }
+
+/* The USB cables: the same as the controllers', drawn by wheel.js from the socket down to the wheel. */
+.usb-cables path[data-on="true"] {
+  stroke-dashoffset: 0;
+  opacity: 1;
+}
+
 /* ---------------------------------------------------------------- the cable tuner (?tune-cables) */
 
 /* A tool for the owner, not part of the player: sliders for how the cables lie (app.js, buildCableTuner). */
@@ -469,4 +496,38 @@ body[data-chrome="hidden"] .cables {
     background: Highlight;
     color: HighlightText;
   }
+}
+
+/* Where the wheel's force feedback goes, under its mapping buttons. */
+.wheel-ffb {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line, #2a2825);
+}
+
+.wheel-ffb-status,
+.wheel-ffb-live {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.wheel-ffb-live {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+}
+
+/* What the emulated wheel does not have (wheel.js MODEL_INPUTS). */
+.wheel-unit[data-type="0"] .w-l3r3,
+.wheel-unit:is([data-type="0"], [data-type="3"]) .w-shifter,
+.wheel-unit:not([data-type="3"]) .w-gtf,
+.wheel-unit[data-type="3"] :is(.w-dpad, .w-face, .w-l2r2, .w-selstart, .w-l3r3) {
+  display: none;
+}
+
+.wheel-unit .pad-spot[hidden] {
+  display: none;
 }
