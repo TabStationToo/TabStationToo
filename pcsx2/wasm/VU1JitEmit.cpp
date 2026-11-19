@@ -3305,7 +3305,8 @@ namespace VU1Jit
 	bool CompileModule(int vu, u32 pc, const Signature& sig, const ModuleSource& source, CompiledModule* out)
 	{
 		*out = {};
-		const u32 max_blocks = vu ? MODULE_BLOCKS : MODULE_BLOCKS0;
+		const u32 default_blocks = vu ? MODULE_BLOCKS : MODULE_BLOCKS0;
+		const u32 max_blocks = source.block_limit ? std::min(source.block_limit, default_blocks) : default_blocks;
 		const u32 max_instrs = vu ? MODULE_INSTRS : MODULE_INSTRS0;
 		std::vector<BlockPlan> blocks(1);
 		if (!PlanBlock(vu, pc, sig, &blocks[0]))

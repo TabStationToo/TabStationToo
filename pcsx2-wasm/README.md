@@ -378,6 +378,17 @@ micro-mode JIT stays off). VU1 JIT testing (`docs/web-port/VU1-JIT-DESIGN.md`; n
   every instruction of COUNT random programs, `jit` runs each one on the interpreter and on the JIT
   and compares them, `both` does both.
 - `window.PCSX2Web.vu1jit()` returns the mode, the counters and the fuzzer's status.
+- `?vu1cache=16|32|64` sets the maximum number of dispatcher entries per VU1 PC for this page.
+  The default is 16. `&vu1cacheblocks=16|64|128|256` limits the number of blocks generated per VU1
+  module, including merges. With this option the live generated binaries also have a 128 MiB
+  budget. Leaving it out keeps the existing 1,024-block limit.
+- `&vu1cachetrace=10` enables cumulative `VU1_CACHE` logs every 10 vsyncs. The interval can be
+  10 through 600. The log separates code generation, browser compilation, instantiation,
+  function-table insertion and cache management. `live_wasm_bytes` counts generated binaries
+  still represented in the cache. It does not estimate the browser's executable memory.
+- The headless equivalents for capacity and block count are `-vu1jit-cache` and
+  `-vu1jit-cache-blocks`. `-vu1jit-fuzz 127:80:cache` replays 80 overlays at a fixed PC through
+  both the interpreter and the JIT, including restores across eviction and reset.
 
 The headless runner has the same switches and more: `-eejit 0`, `-iopjit 0`, `-set EmuCore/CPU/Recompiler/EnableVU1=false`,
 `-vu1jit-fuzz SEED:COUNT[:MODE]`, `-vu1jit-oracle` (the timing model checked at every VU1

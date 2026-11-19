@@ -92,6 +92,8 @@ static void PrintCompileStatsTotal();
 #ifdef __EMSCRIPTEN__
 // VU1 JIT test modes (docs/web-port/VU1-JIT-DESIGN.md section 12).
 static std::string s_vu1jit_fuzz;
+static u32 s_vu1jit_cache_versions = 0;
+static u32 s_vu1jit_module_blocks = 0;
 static std::string s_vu1jit_stats_path;
 static bool s_vu1jit_report = false;
 #endif
@@ -354,6 +356,20 @@ static bool ParseCommandLineArgs(int argc, char* argv[])
 #ifdef __EMSCRIPTEN__
 		else if (arg == "-vu1jit-fuzz" && has_value)
 			s_vu1jit_fuzz = argv[++i];
+		else if (arg == "-vu1jit-cache" && has_value)
+		{
+			const auto cap = StringUtil::FromChars<u32>(argv[++i]);
+			if (!cap || (*cap != 16 && *cap != 32 && *cap != 64))
+				return false;
+			s_vu1jit_cache_versions = *cap;
+		}
+		else if (arg == "-vu1jit-cache-blocks" && has_value)
+		{
+			const auto cap = StringUtil::FromChars<u32>(argv[++i]);
+			if (!cap || (*cap != 16 && *cap != 64 && *cap != 128 && *cap != 256))
+				return false;
+			s_vu1jit_module_blocks = *cap;
+		}
 		else if (arg == "-vu1jit-oracle")
 		{
 			VU1Jit::SetOracle(true);
@@ -502,8 +518,8 @@ static bool ParseCommandLineArgs(int argc, char* argv[])
 								 "  -jit-compile-stats prints, every VSYNCS vsyncs and at the end, the JITs' compile time: the total and\n"
 								 "         the largest in one vsync, for the EE and IOP JITs (EE thread) and for all JITs.\n");
 #ifdef __EMSCRIPTEN__
-			std::fprintf(stderr, "         [-vu1jit-fuzz SEED:COUNT[:timing|jit|both[:hashes]]] [-vu1jit-oracle] [-vu1jit-lockstep] [-vu0jit-lockstep] [-vu0jit-slices 0|1]\n"
-								 "         [-vu1jit-stats FILE] [-mtvu-sync]\n");
+			std::fprintf(stderr, "         [-vu1jit-fuzz SEED:COUNT[:timing|jit|both|cache[:hashes]]] [-vu1jit-oracle] [-vu1jit-lockstep] [-vu0jit-lockstep] [-vu0jit-slices 0|1]\n"
+								 "         [-vu1jit-stats FILE] [-vu1jit-cache 16|32|64] [-vu1jit-cache-blocks 16|64|128|256] [-mtvu-sync]\n");
 #endif
 			std::fprintf(stderr, "  With no disc image the BIOS boots to its menu. -frames 0 runs until stopped.\n");
 			std::fprintf(stderr, "  -elf boots a PS2 executable (always fast boot), with the disc image in the drive if one is given.\n");
@@ -529,6 +545,7 @@ static bool ParseCommandLineArgs(int argc, char* argv[])
 			std::fprintf(stderr, "  VU1 JIT (WebAssembly; on by default, off with -set EmuCore/CPU/Recompiler/EnableVU1=false):\n"
 								 "  -vu1jit-fuzz runs random VU1 programs without a BIOS or a VM and exits: 'timing' checks the\n"
 								 "         timing model at every instruction, 'jit' compares the interpreter and the JIT, 'both' does both.\n"
+								 "         'cache' replays 80 fixed-PC overlays before and after eviction and reset.\n"
 								 "  -vu1jit-oracle checks the timing model at every VU1 instruction the JIT's dispatcher runs.\n"
 								 "  -vu1jit-lockstep runs every VU1 program on the JIT and on the interpreter and compares them.\n"
 								 "  -vu0jit-lockstep does the same for VU0 micro programs (the VU0 JIT is on by default, off with EnableVU0=false).\n"
@@ -1008,6 +1025,8 @@ int main(int argc, char* argv[])
 	if (s_disc_check)
 		return RunDiscCheck();
 #ifdef __EMSCRIPTEN__
+
+	VU1Jit::ConfigureCache(s_vu1jit_cache_versions, 0, s_vu1jit_module_blocks);
 
 	// Needs no BIOS, settings or VM: random programs on the VU1 interpreter and the JIT, on their own thread.
 	if (!s_vu1jit_fuzz.empty())

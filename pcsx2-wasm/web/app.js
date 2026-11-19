@@ -988,6 +988,18 @@
 
 	function startVu1JitTesting() {
 		const M = window.Module;
+		const versions = params.get('vu1cache');
+		const trace = params.get('vu1cachetrace');
+		const blocks = params.get('vu1cacheblocks');
+		if ((versions !== null || trace !== null || blocks !== null) && typeof M._pcsx2web_vu1jit_cache === 'function') {
+			if ((versions !== null && !['16', '32', '64'].includes(versions)) ||
+				(blocks !== null && !['16', '64', '128', '256'].includes(blocks)) ||
+				(trace !== null && (!/^\d+$/.test(trace) || Number(trace) < 10 || Number(trace) > 600))) {
+				pageLog('Use ?vu1cache=16, 32, or 64, ?vu1cacheblocks=16, 64, 128, or 256 and ?vu1cachetrace=10 through 600.', 'warn');
+			} else {
+				M._pcsx2web_vu1jit_cache(Number(versions), Number(trace), Number(blocks));
+			}
+		}
 		if (!VU1JIT_PARAM)
 			return;
 		if (typeof M._pcsx2web_vu1jit_enable !== 'function') {

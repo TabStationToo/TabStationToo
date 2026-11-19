@@ -130,6 +130,7 @@ namespace VU1Jit
 		void* ctx = nullptr;
 		// More blocks (PC, signature) to start from: merging modules into one.
 		std::vector<std::pair<u32, Signature>> roots;
+		u32 block_limit = 0; // zero keeps the emitter's normal bound
 	};
 
 	// Compiles the block at pc for sig and the blocks reachable from it, through static branches, fall-throughs

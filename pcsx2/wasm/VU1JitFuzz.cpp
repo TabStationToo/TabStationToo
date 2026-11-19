@@ -875,6 +875,7 @@ namespace VU1Jit
 			bool timing = true;
 			bool jit = false;
 			bool vu0 = false; // mode vu0: the programs on VU0 (interpreter against WasmVU0)
+			bool cache = false; // fixed-PC overlay reuse and eviction
 			bool hashes = false; // log a hash of each program's interpreter result (to compare engines and tiers)
 		};
 
@@ -894,7 +895,8 @@ namespace VU1Jit
 				out->timing = parts[2] == "timing" || parts[2] == "both";
 				out->jit = parts[2] == "jit" || parts[2] == "both";
 				out->vu0 = parts[2] == "vu0";
-				if (!out->timing && !out->jit && !out->vu0)
+				out->cache = parts[2] == "cache" && out->count == 80;
+				if (!out->timing && !out->jit && !out->vu0 && !out->cache)
 					return false;
 			}
 			if (parts.size() == 4)
@@ -1148,6 +1150,65 @@ namespace VU1Jit
 		return diff;
 	}
 
+	// A branch makes two dispatchable blocks. Vary the same PC's signature and its code
+	// independently, then restore the earliest overlay both before and after cache pressure.
+	static u32 FuzzCache(ProgramGenerator& gen, FuzzEnvironment& env, RunState& start, RunState& ref, RunState& jit)
+	{
+		gen.Generate(env.Micro(), env.Mem(), VU1);
+		vu1Thread.vuFBRST = 0;
+		VU1.xgkickenable = false;
+		CpuWasmVU1.Reset();
+		auto initial = std::make_unique<RunState>();
+		CaptureRunState(initial.get());
+		const GeneratedProgram program{0, 0, 64, 0, ~0u, ~0u};
+		const u32 nop_upper = UpperOpcodeBits(Upper::NOP);
+		const u32 nop_lower = LowerOpcodeBits(Lower::MOVE);
+		const auto run = [&](u32 overlay, u32 backup) {
+			RestoreRunState(*initial);
+			VU1.VIBackupCycles = backup;
+			VU1.VIRegNumber = 3;
+			const u32 code[] = {
+				LowerOpcodeBits(Lower::B) | 1,
+				nop_upper,
+				nop_lower,
+				nop_upper,
+				LowerOpcodeBits(Lower::IADDIU) | (2 << 16) | overlay,
+				nop_upper | 0x40000000,
+				nop_lower,
+				nop_upper,
+			};
+			CpuWasmVU1.Clear(0, sizeof(code));
+			std::memcpy(env.Micro(), code, sizeof(code));
+			bool compared;
+			const std::string diff = FuzzJit(program, start, ref, jit, &compared);
+			if (!diff.empty())
+				Console.ErrorFmt("VU1 cache fuzz: overlay {} signature {}: {}", overlay, backup, diff);
+			return compared && diff.empty() && GetPublicStats().selftest.load(std::memory_order_relaxed) == 1;
+		};
+		const auto compiled = [] { return GetPublicStats().compiles.load(std::memory_order_relaxed); };
+		u32 failures = 0;
+		failures += !run(1, 0);
+		const u32 first = compiled();
+		failures += !run(1, 1);
+		failures += compiled() <= first;
+		failures += !run(2, 0);
+		const u32 before_restore = compiled();
+		failures += !run(1, 0);
+		failures += compiled() != before_restore;
+		for (u32 overlay = 3; overlay <= 80; overlay++)
+			failures += !run(overlay, 0);
+		const u32 before_evicted = compiled();
+		failures += !run(1, 0);
+		failures += compiled() <= before_evicted;
+		const u32 before_reset = compiled();
+		CpuWasmVU1.Reset();
+		failures += !run(1, 0);
+		failures += compiled() <= before_reset;
+		Console.WriteLnFmt("VU1 cache fuzz: two signatures, 80 same-PC overlays, restore before/after eviction and reset, {} differences", failures);
+		LogReport();
+		return failures;
+	}
+
 	static int FuzzMain(const FuzzSpec& spec)
 	{
 		FuzzStatus& status = s_fuzz_status;
@@ -1158,6 +1219,14 @@ namespace VU1Jit
 		auto start = std::make_unique<RunState>();
 		auto ref = std::make_unique<RunState>();
 		auto jit = std::make_unique<RunState>();
+		if (spec.cache)
+		{
+			const u32 failures = FuzzCache(gen, env, *start, *ref, *jit);
+			status.done.store(spec.count, std::memory_order_relaxed);
+			status.differences.store(failures, std::memory_order_relaxed);
+			std::snprintf(status.summary, sizeof(status.summary), "fixed-PC cache replay: %u differences", failures);
+			return failures ? 1 : 0;
+		}
 		u32 jit_differences = 0;
 		u32 jit_compared = 0;
 		u64 ref_hash = 0;
@@ -1272,7 +1341,7 @@ namespace VU1Jit
 		FuzzSpec spec;
 		if (!ParseFuzzSpec(spec_string, &spec))
 		{
-			Console.Error(fmt::format("VU1 JIT fuzz: bad spec '{}' (use SEED:COUNT[:timing|jit|both[:hashes]])", spec_string));
+			Console.Error(fmt::format("VU1 JIT fuzz: bad spec '{}' (use SEED:COUNT[:timing|jit|both|cache[:hashes]])", spec_string));
 			s_fuzz_status.state.store(4, std::memory_order_release);
 			return 2;
 		}

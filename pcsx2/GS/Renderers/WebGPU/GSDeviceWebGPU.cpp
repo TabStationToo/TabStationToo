@@ -189,11 +189,20 @@ GSDeviceWebGPU::UtilityPipelineKey GSDeviceWebGPU::MakeKey(UtilityModule module,
 	return key;
 }
 
-GSDeviceWebGPU::UtilityPipelineKey GSDeviceWebGPU::ConvertPipelineKey(ShaderConvertSelector shader, WGPUTextureFormat format)
+GSDeviceWebGPU::UtilityPipelineKey GSDeviceWebGPU::ConvertPipelineKey(
+	ShaderConvertSelector shader, WGPUTextureFormat format, WGPUTextureFormat source_format)
 {
 	// Depth outputs write frag_depth into a depth attachment (the "_ds" entry points), DATM writes the
 	// stencil only (§8.4); format is then the depth-stencil format.
-	const TexLayout layout = shader.Float32Input() ? TexLayout::Unfilterable : TexLayout::Float;
+	// ColorClip may be RGBA16Unorm on adapters with texture-formats-tier1. WebGPU
+	// exposes that format only as UnfilterableFloat (unlike RGBA16Float).
+	constexpr auto source_layout = [](ShaderConvertSelector selector, WGPUTextureFormat native_format) {
+		return (selector.Float32Input() || native_format == WGPUTextureFormat_RGBA16Unorm) ? TexLayout::Unfilterable : TexLayout::Float;
+	};
+	static_assert(source_layout(ShaderConvert::COLCLIP_RESOLVE, WGPUTextureFormat_RGBA16Unorm) == TexLayout::Unfilterable);
+	static_assert(source_layout(ShaderConvert::COLCLIP_RESOLVE, WGPUTextureFormat_RGBA16Float) == TexLayout::Float);
+	static_assert(source_layout(ShaderConvert::DEPTH_COPY, WGPUTextureFormat_R32Float) == TexLayout::Unfilterable);
+	const TexLayout layout = source_layout(shader, source_format);
 	if (shader.StencilOutput())
 		return MakeKey(MODULE_CONVERT, shader.EntryPoint(), WGPUTextureFormat_Undefined, layout, 0, BLEND_NONE, 0, format,
 			DS_WRITE_STENCIL);
@@ -201,8 +210,7 @@ GSDeviceWebGPU::UtilityPipelineKey GSDeviceWebGPU::ConvertPipelineKey(ShaderConv
 		return MakeKey(MODULE_CONVERT, fmt::format("{}_ds", shader.EntryPoint()).c_str(), WGPUTextureFormat_Undefined, layout,
 			0, BLEND_NONE, 0, format, DS_WRITE_DEPTH);
 
-	return MakeKey(MODULE_CONVERT, shader.EntryPoint(), format,
-		shader.Float32Input() ? TexLayout::Unfilterable : TexLayout::Float, shader.Mask(), BLEND_NONE,
+	return MakeKey(MODULE_CONVERT, shader.EntryPoint(), format, layout, shader.Mask(), BLEND_NONE,
 		(shader.SupportsBilinear() && shader.Biln()) ? 1 : 0);
 }
 
@@ -823,7 +831,11 @@ bool GSDeviceWebGPU::CompileUtilityPipelines()
 	for (u32 i = 0; i < ShaderConvertSelector::NUM_TOTAL_SHADERS; i++)
 	{
 		const ShaderConvertSelector shader = ShaderConvertSelector::Get(i);
-		const UtilityPipelineKey key = ConvertPipelineKey(shader, LookupNativeFormat(shader.OutputFormat()));
+		// Prewarm the same layout used for the ColorClip resolve's actual source.
+		const WGPUTextureFormat source_format = shader.Shader() == ShaderConvert::COLCLIP_RESOLVE ?
+		                                            LookupNativeFormat(GSTexture::Format::ColorClip) :
+		                                            WGPUTextureFormat_Undefined;
+		const UtilityPipelineKey key = ConvertPipelineKey(shader, LookupNativeFormat(shader.OutputFormat()), source_format);
 		if (key.module < MODULE_COUNT && key.color_format != WGPUTextureFormat_Undefined)
 			keys.push_back(key);
 	}
@@ -1820,12 +1832,13 @@ void GSDeviceWebGPU::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i
 void GSDeviceWebGPU::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
 	ShaderConvertSelector shader, Filter filter)
 {
-	pxAssert(dTex);
+	pxAssert(sTex && dTex);
 	GSTextureWebGPU* const d = static_cast<GSTextureWebGPU*>(dTex);
+	GSTextureWebGPU* const s = static_cast<GSTextureWebGPU*>(sTex);
 	// Callers name depth-like shaders without the depth-output flag; a depth target means frag_depth.
 	if (d->IsDepthStencil() && shader.Float32Output())
 		shader = shader.SetDepthOutput(true);
-	const UtilityPipelineKey key = ConvertPipelineKey(shader, d->GetNativeFormat());
+	const UtilityPipelineKey key = ConvertPipelineKey(shader, d->GetNativeFormat(), s->GetNativeFormat());
 	if (d->IsDepthStencil() != (shader.DepthOutput() || shader.StencilOutput()))
 	{
 		static bool warned = false;
@@ -1838,9 +1851,14 @@ void GSDeviceWebGPU::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTe
 	}
 
 	filter = shader.SupportsBilinear() ? Nearest : filter; // no HW bilinear when the shader filters
-	const BindGroupKind kind = shader.Float32Input() ? BindGroupKind::Unfilterable :
-							   (filter == Biln) ? BindGroupKind::Linear : BindGroupKind::Point;
-	DoUtilityStretchRect(static_cast<GSTextureWebGPU*>(sTex), sRect, d, dRect, GetUtilityPipeline(key), kind,
+	constexpr auto bind_group_kind = [](u8 layout, Filter sampling) {
+		if (layout == static_cast<u8>(TexLayout::Unfilterable))
+			return BindGroupKind::Unfilterable;
+		return sampling == Biln ? BindGroupKind::Linear : BindGroupKind::Point;
+	};
+	static_assert(bind_group_kind(static_cast<u8>(TexLayout::Unfilterable), Biln) == BindGroupKind::Unfilterable);
+	const BindGroupKind kind = bind_group_kind(key.layout, filter);
+	DoUtilityStretchRect(s, sRect, d, dRect, GetUtilityPipeline(key), kind,
 		shader.Mask() == 0xf);
 }
 

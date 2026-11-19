@@ -9,11 +9,14 @@
 
 #include "common/Pcsx2Types.h"
 
+#include <chrono>
 #include <cstddef>
 #include <vector>
 
 extern "C" {
 int wasmjit_compile(const void* ptr, size_t len);
+int wasmjit_compile_vu1(const void* ptr, size_t len);
+void wasmjit_clear_vu1_modules();
 int wasmjit_validate(const void* ptr, size_t len);
 int wasmjit_instantiate(int module);
 int wasmjit_add_function(int instance, const char* name);
@@ -43,22 +46,37 @@ namespace WasmJit
 		bool IsLoaded() const { return slot != 0; }
 	};
 
-	// Compiles bytes, instantiates them and puts export `name` in this thread's table.
-	inline LoadResult Load(const std::vector<u8>& bytes, const char* name, LoadedFunction* out)
+	struct LoadTiming
 	{
+		u64 compile_ns = 0;
+		u64 instantiate_ns = 0;
+		u64 table_ns = 0;
+	};
+
+	// Compiles bytes, instantiates them and puts export `name` in this thread's table.
+	inline LoadResult Load(const std::vector<u8>& bytes, const char* name, LoadedFunction* out, LoadTiming* timing = nullptr, bool reuse_vu1 = false)
+	{
+		const auto measure = [timing](u64 LoadTiming::* field, auto action) {
+			if (!timing)
+				return action();
+			const auto start = std::chrono::steady_clock::now();
+			const int result = action();
+			timing->*field += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+			return result;
+		};
 		*out = {};
-		const int module = wasmjit_compile(bytes.data(), bytes.size());
+		const int module = measure(&LoadTiming::compile_ns, [&]() { return reuse_vu1 ? wasmjit_compile_vu1(bytes.data(), bytes.size()) : wasmjit_compile(bytes.data(), bytes.size()); });
 		if (module <= 0)
 			return (module < 0) ? LoadResult::OutOfMemory : LoadResult::CompileError;
 
-		const int instance = wasmjit_instantiate(module);
+		const int instance = measure(&LoadTiming::instantiate_ns, [&]() { return wasmjit_instantiate(module); });
 		if (instance <= 0)
 		{
 			wasmjit_release(module);
 			return (instance < 0) ? LoadResult::OutOfMemory : LoadResult::CompileError;
 		}
 
-		const int slot = wasmjit_add_function(instance, name);
+		const int slot = measure(&LoadTiming::table_ns, [&]() { return wasmjit_add_function(instance, name); });
 		if (slot == 0)
 		{
 			wasmjit_release(instance);

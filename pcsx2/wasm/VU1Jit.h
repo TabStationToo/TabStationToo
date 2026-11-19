@@ -25,6 +25,7 @@ public:
 	const char* GetShortName() const override { return "wVU1"; }
 	const char* GetLongName() const override { return "VU1 WebAssembly JIT"; }
 
+	// Live generated Wasm binary bytes. Host code and engine structures are not observable here.
 	size_t GetCommittedCache() const override;
 
 	void Shutdown() override;
@@ -59,6 +60,7 @@ namespace VU1Jit
 	// Debug options of the headless runner (section 12). Set before the VM starts.
 	void SetLockstep(bool enabled); // -vu1jit-lockstep: every program runs on the JIT and on the interpreter
 	void SetOracle(bool enabled); // -vu1jit-oracle: the timing model is checked at every VU1 instruction
+	void ConfigureCache(u32 versions, u32 report_every, u32 block_limit);
 	void SetStats(bool enabled); // -vu1jit-stats: per-vsync statistics, kept until WriteStats
 
 	// EE thread, once per vsync (the statistics are kept per vsync).
@@ -78,7 +80,7 @@ namespace VU1Jit
 	{
 		std::atomic<u32> selftest; // 0 not run, 1 passed, 2 failed
 		std::atomic<u32> executes;
-		std::atomic<u32> programs; // compiled modules alive
+		std::atomic<u32> programs; // dispatcher entries currently listed
 		std::atomic<u32> compiles;
 		std::atomic<u32> entries; // calls into generated code
 		std::atomic<u32> instructions; // VU1 instructions run by the dispatcher (generated code and fallbacks)

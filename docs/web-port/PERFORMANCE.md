@@ -184,6 +184,128 @@ simpler distant figures), so each row compares one version with itself.
 - **GTA San Andreas in the page** after the limiter change: the owner's recording shows 99.3 % on
   average in gameplay, with EE-bound dips to 81-89 % at the start of the game.
 
+### VIF UNPACK and WebGPU diagnostics (2026-11-18 experiment)
+
+- `TST_WASM_DIAG_VIF=1` reports cumulative UNPACK calls in batches of 16,384 on each worker,
+  split by VIF unit, mode 0 versus nonzero mode, and fill versus skip path. The S-32, V2-32
+  and V4-32 counts are for unmasked mode 0. V4-32 includes packets handled by the existing
+  contiguous copy.
+- `TST_WASM_DIAG_GS=1` reports pending and failed TFX pipeline skips and render/depth target
+  size mismatch skips at powers of two. Every 16,384 HW draw calls it reports cumulative
+  totals, including feedback draws routed through the copy path. This count can include draws
+  skipped before the copy. The draw and wait policies are unchanged.
+- `TST_WASM_OPT_VIF32=1` adds direct mode-0, unmasked S-32, V2-32 and V4-32 writes.
+  The existing contiguous V4-32 copy runs before the experimental path. All three flags are
+  off by default. The standalone test at `tools/wasm/tests/vif-unpack-fast.cpp` matched
+  9,126 reference cases for VU memory and VIF address, count and cycle state, including address
+  wraparound, fill and skip cycles. It also checked both early exits.
+
+God of War (SLPM-67010), first ship scene from the same state in Chrome 157 on Apple Metal,
+at native resolution. Both diagnostic builds linked with Emscripten 6.0.12. Each build
+reproduced a WebGPU validation failure in all three cold and three warm runs. The
+`RGBA16Unorm` colour clip texture exposed `UnfilterableFloat`, while the utility bind group
+required `Float`. This left the output black even with `?pipelines=wait`. Both builds produced
+the same software-rendered PNG at vsync 475. The EE, IOP, VU and SPU2 state entries matched
+in saves requested at vsync 465. The GS entry also varied between two runs of the baseline.
+The hardware timings capture the validation failure and cannot establish a VIF speed gain.
+Keep the fast path off by default.
+
+For a rendering fix, check the `COLCLIP_RESOLVE` conversion in
+`GSDeviceWebGPU::DoStretchRect()` and `ConvertPipelineKey()` in `GSDeviceWebGPU.cpp`.
+Verify that the pipeline layout and sampler match the source colour clip texture's native
+sample type before repeating the hardware A/B.
+
+### VU1 module size and cache pressure in God of War (2026-11-18 experiment)
+
+The baseline includes the ColorClip binding fix and leaves the experimental VIF path and
+diagnostic logging off. Chrome 157 on Apple Metal replayed the same SLPM-67010 ship-deck
+state at native resolution, with the frame limiter and default CPU settings. Each measured
+run used a fresh Chrome profile, so it started without stored GPU pipeline or EE code lists.
+The VU1 cache started empty. It belongs to its worker and a save-state load requests a flush.
+
+The short screen measures vsyncs 450–520. Speed and P95 come from separate runs with tracing
+off. The other columns are cumulative-counter differences between EE vsync markers 450 and
+520 in diagnostic runs of the same settings. Evictions count dispatcher entries. A repeated
+compilation fingerprint includes the full signatures, covered microcode and ranges, relevant
+settings and emitted module shape. The fingerprint is used for diagnostics only.
+
+| Versions per PC | Overall Speed | P95 | Recompiled after removal | Find / install evictions | Entry-limit flushes | Live Wasm at end (sampled peak) |
+|---|---:|---:|---:|---:|---:|---:|
+| 16 | 8.8% | 299 ms | 311 | 474 / 124,914 | 0 | 120.7 (120.7) MiB |
+| 32 | 16.7% | 219 ms | 586 | 123 / 5,901 | 2 | 8.9 (17.3) MiB |
+| 64 | 15.3% | 246 ms | 906 | 102 / 3,797 | 4 | 1.2 (9.1) MiB |
+
+The original 16-version cache generated 127,637 blocks in the short diagnostic window.
+The final 32-version, 64-block candidate generated 548 blocks and repeated 5 previously
+removed identities in a short diagnostic run. Per-vsync generation fell from 55.1 to
+0.26 ms and browser compilation from 19.2 to 0.09 ms. Churn continued later in the scene.
+The separate 300-vsync candidate trace recorded 2,102 repeats and 32,946 generated blocks
+at 2.54 ms of generation and 1.33 ms of browser compilation per vsync. With tracing off
+and the 64-block limit, the final short screen measured 51.7% Speed with 16 versions
+and 55.7% with 32. The 32-version candidate then ran the repeated long comparison. Incremental
+global eviction and deferring secondary entries were also tried. Both strategies retained
+high code-generation costs and were dropped. The candidate limits generated modules,
+including merges, and removes global owning-vector entries by index while preserving each
+PC's MRU order. The dispatcher passes a copied exit signature into lookups that can release
+the exit's owning module. A bounded module leaving through a missing edge still uses the
+usual dispatch and content checks.
+
+The final test interleaved three trials per build over vsyncs 450–749, with tracing off.
+Overall Speed is emulated time divided by measured wall time. Speed median and P10 use the
+Recorder's ten-vsync smoothing. The figures below are medians of the three trials.
+
+| Build | Wall time, 300 vsyncs | Overall Speed | Smoothed median / P10 | P95 | EE / GS / VU1 |
+|---|---:|---:|---:|---:|---:|
+| Baseline | 91.29 s | 5.5% | 6.6% / 3.2% | 681 ms | 16% / 4% / 100% |
+| 32 versions, 64 blocks | 7.75 s | 64.6% | 70.8% / 45.7% | 50 ms | 100% / 19% / 70% |
+
+The candidate's separate long diagnostic run sampled 36.7 MiB of live generated binaries at
+its peak, with zero capacity flushes over the measured window. The experiment caps live
+generated binaries at 128 MiB. Browser executable memory is outside that estimate. The
+linear-memory sizes at the end of the performance runs had medians of 1,096 MiB for the
+baseline and 807 MiB for the candidate.
+
+Both builds showed the scene on WebGPU. The unsynchronized browser snapshots and save
+requests are compared separately from the synchronized headless state. One browser
+candidate run differed in screenshot hash and several state components. Two candidate
+repeats matched the baseline screenshot and all separate state components other than the
+version record and internal structures. The synchronized EE, IOP, VU, SPU2 and GS data
+matched. The internal state differed only in unused IALU slots with an empty ring and
+three serialized host GIF buffer pointers that the loader replaces with its own addresses.
+In-session browser reload invalidated the cached modules and resumed the visible scene.
+A 520-vsync interpreter lockstep run compared 72,509 VU1 executions with zero differences.
+The fixed-PC cache replay passed for all three capacities, as did 1,500 randomized programs.
+
+Use `?vu1cache=32&vu1cacheblocks=64` for this experiment. Default capacity and module limits
+stay at 16 and 1,024 pending measurements from other games and scenes.
+
+### God of War, smaller VU1 modules in sustained play (2026-11-18)
+
+With 32 versions per PC, `?vu1cache=32&vu1cacheblocks=16` is available as an experiment.
+Both settings ran in the same Chrome 157 / Metal build, at native resolution and stock timing.
+Three interleaved trials per arm started from fresh browser profiles. An EE-vsync replay
+applied the movement and attack inputs. Physical gamepads were isolated in the test page.
+
+| Scene and measured vsyncs | 64 blocks, effective Speed (%) | 16 blocks, effective Speed (%) | Median wall seconds, 64 / 16 | Median frame P95 ms, 64 / 16 |
+|---|---|---|---|---|
+| Ship transition, 450–749 | 74.92, 77.64, 60.14 | 81.58, 97.04, 63.63 | 6.68 / 6.14 | 41.62 / 33.20 |
+| Ship transition, 450–1649 | 47.59, 49.05, 42.77 | 63.82, 81.78, 64.38 | 42.07 / 31.10 | 91.63 / 38.53 |
+| Enemy encounter from a later save, 450–1649 | 51.33, 48.42, 49.11 | 78.79, 64.08, 73.57 | 40.76 / 27.21 | 65.36 / 31.13 |
+
+In separate VU1 diagnostic runs over markers 450–1650, generated blocks fell from
+496,547 to 176,236, generation from 10.43 to 2.28 seconds, and browser compilation
+from 4.49 to 1.16 seconds. Sampled live module payload peaked at 78.52 and 29.48 MiB.
+Lookup hits rose from 13.25 to 23.33 million. Smaller modules leave more work to the
+dispatcher. In a late CPU profile of the 16-block build, Dispatch accounted for 12.0%
+VU1 self time. On EE, generated blocks and lookup took 58.4% and generated branch-end
+and due helpers another 9.6% of the time-weighted samples.
+
+The separate EE word-wise code comparison experiment was reverted. Its inclusive
+profile share changed from 4.02% to 3.81%, and its input-replay long runs lost all
+three pairs. The VU1 candidate passed 133,387 interpreter lockstep comparisons.
+Cross-game coverage was a 600-vsync Tekken 5 startup with fixed RTC. Default settings
+are unchanged. Stable 90% was not demonstrated.
+
 ## Tried and dropped
 
 Measured, exact or not, and not kept because the gain was too small for the change:
@@ -402,3 +524,75 @@ Measured, exact or not, and not kept because the gain was too small for the chan
   rest. Running the start later, with the rest, would change where the program ends against the EE's cycles (event
   tests run VU0 too, without the EE's catch-up), so it is not exact; not done. 34 M COP2 interpreter calls per 1500
   vsyncs remain (VCALLMS, and the moves while VU0 runs, which generated code leaves to the interpreter).
+
+### God of War combat module-size follow-up (2026-11-19)
+
+The 16-block limit with 32 versions per PC remains the experiment. In a fresh A/B on
+Chrome and Apple Metal, narrowing the cap to eight blocks cut compilation but did
+not improve the main combat window. Both arms used the same replay build and a
+fixed 1,200-vsync measurement from the late ship-deck save with sample-matched
+controller input during vsyncs 450–1049.
+
+| Window | 16 blocks, effective speed | 8 blocks, effective speed | Smoothed speed P10, 16 / 8 | Frame time P95, 16 / 8 |
+|---|---|---|---|---|
+| Deck, 450–1649 | 80.92 / 88.56 / 90.47% | 98.02 / 99.87 / 83.07% | 75.06 / 88.85% | 28.46 / 20.72 ms |
+| Combat, 450–1649 | 97.66 / 96.67 / 78.15% | 96.08 / 95.71 / 98.92% | 89.41 / 85.90% | 20.18 / 20.69 ms |
+| Combat after input, 1350–1649 | 100.00 / 99.94 / 92.62% | 97.11 / 98.53 / 100.00% | 99.42 / 94.69% | 17.19 / 19.06 ms |
+
+While the input was active, 24.38% of VU1 samples were attributed to module
+compilation and installation. In the late window the share fell to 17.51%,
+while generated VU1 code was 38.44% and dispatch and exits 15.46% before lookup.
+On EE, generated blocks and lookup accounted for 61.36%, branch helpers for
+9.25% and event/exit work for 10.52%. GS waited or was idle in 58.35% of late
+samples. These shares use counts within each role, with long sampling intervals
+reported separately. The smaller cap is worth investigating for the deck
+transition, while the combat results overlap and its late P10 regressed. The
+8- and 32-block trials were removed from the worktree.
+
+#### Ship-deck glare in the WebGPU hardware renderer
+
+These observations describe the phase-three build, before the pass-reuse fix below.
+
+In the Japanese God of War release (SLPM-67010), the default WebGPU hardware
+blending overexposes parts of the rainy ship deck in this save. At matched
+replay frames, the software renderer shows the enemies and railings behind
+the bright patch. Hardware blending accuracy levels 2 through 4 and turning
+off the feedback compute optimization leave the bright patch visible. Maximum
+blending reproduces the software reference closely, but is impractically slow
+on this backend in this scene. Use `?renderer=sw` for this view. It selects
+software drawing with WebGPU presentation where available. The rendering
+comparison is separate from the native-resolution hardware performance test.
+
+The narrower `EmuCore/GS/HWAccurateAlphaTest=true` override also restores the
+deck geometry and lighting. The toggle changes the alpha-fail handling in
+`GSRendererHW::EmulateAlphaTest`, which isolates the discrepancy to that
+hardware path rather than the presentation filter or texture filtering.
+This override was slow on WebGPU as well. The software-drawing link is the
+tested workaround. The exact draw and a fast hardware fix remain open.
+
+#### Consuming a pending clear on WebGPU pass reuse (2026-11-19)
+
+The frame-one GS prefix from the combat save isolates two effects. GS draw 6
+uses pass-then-fail or feedback for RGB_ONLY. Their first RGB differences are
+one code value, with identical alpha and depth. The occlusion error starts at
+GS draw 12. The current depth attachment has a pending zero clear. Reusing
+the pass leaves that clear pending across subsequent depth writes. When GS
+draw 15 opens another pass, its load operation clears those newer values.
+The real prefix reproduces 4,656 changed depth texels and 992 changed color
+texels at draw 15 in both whole-machine and isolated WebGPU replay.
+
+SendHWDraw now reopens the pass if either attachment has a pending clear or
+invalidation. Its existing attachment load operations initialize the target
+before drawing and mark it dirty. On combat frame 520, full-frame RGB MAE
+against software fell from 51.60 to 0.65 out of 255. The original glare ROI
+had 6,255 bright pixels before and zero after. Frames 30, 451, 620 and 1400
+also retained the scene and weather with the standard hardware alpha path.
+
+At native resolution on the M6 Mac mini in Chrome 157, the fixed-input
+450–1649 combat window ran at 93.24 / 93.02 / 94.27% with this fix and
+92.64 / 91.86 / 92.86% at baseline. The fixed median smoothed P10 was
+84.03% and the median frame-time P95 was 21.95 ms. The first 300 combat
+vsyncs had a median speed of 84.66%. Deck repeats ranged from 87.20 to
+94.59%. The combat controls skipped 3 / 2 / 1 pipeline draws in the window
+and the fixed runs skipped none. Deck runs had in-window skips in both sets.
+These measurements retain the 32-version, 16-block VU1 configuration.

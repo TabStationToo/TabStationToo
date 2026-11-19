@@ -29,6 +29,8 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 WasmVU1 CpuWasmVU1;
@@ -42,6 +44,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE int vu1jit_selftest_helper(int x)
 
 namespace VU1Jit
 {
+	static constexpr u32 DEFAULT_VERSIONS_PER_PC = 16;
+	static std::atomic<u32> s_versions_per_pc{DEFAULT_VERSIONS_PER_PC};
+	static std::atomic<u32> s_cache_report_every{0};
+	static std::atomic<u32> s_module_block_limit{0};
+
+	void ConfigureCache(u32 versions, u32 report_every, u32 block_limit)
+	{
+		s_versions_per_pc.store(versions == 32 || versions == 64 ? versions : DEFAULT_VERSIONS_PER_PC, std::memory_order_relaxed);
+		s_module_block_limit.store(block_limit == 16 || block_limit == 64 || block_limit == 128 || block_limit == 256 ? block_limit : 0, std::memory_order_relaxed);
+		s_cache_report_every.store(report_every >= 10 && report_every <= 600 ? report_every : 0, std::memory_order_relaxed);
+	}
+
 	static bool s_lockstep = false;
 	static bool s_oracle = false;
 	static PublicStats s_public_stats;
@@ -218,6 +232,9 @@ namespace VU1Jit
 			bool mismatch; // the last compare failed: other code is there, until a Clear touches its pages again
 			WasmJit::LoadedFunction fn;
 			std::vector<ExitSlot> exits;
+			size_t wasm_bytes; // generated binary bytes, excluding host executable memory
+			u64 diagnostic_identity = 0;
+			size_t owning_slot;
 			u32 programs; // its blocks still listed (Program): it is released with the last one
 			// Merging (ThreadState::Merge): exits to other modules since it was compiled, how many times its entry was
 			// recompiled into the module it is, and how many targets its jumps had learned then (JumpTargetCount).
@@ -235,6 +252,7 @@ namespace VU1Jit
 			u32 index; // the block's index in the module
 			u32 last_start; // budget test: cycles from the entry to its last instruction
 			u64 runs;
+			size_t owning_slot;
 		};
 
 		// Read and written by generated code at its constant address (section 5.4).
@@ -262,8 +280,101 @@ namespace VU1Jit
 		// (a merged module lists all of its blocks).
 		static constexpr u32 MAX_MODULES = 2000;
 		static constexpr u32 MAX_PROGRAMS = 8192;
+		static constexpr size_t MAX_LIMITED_WASM_BYTES = 128 * _1mb;
 		static constexpr u32 NUM_PCS = VU1_PROGSIZE / 8;
-		static constexpr u32 MAX_VERSIONS_PER_PC = 16; // blocks listed per entry PC (signatures and program versions)
+		enum class DropReason : u8
+		{
+			FindLimit,
+			InstallLimit,
+			Merge
+		};
+		enum class FlushReason : u8
+		{
+			Reset,
+			Settings,
+			Modules,
+			Entries,
+			OutOfMemory,
+			Bytes,
+			Exit
+		};
+
+		using CacheClock = std::chrono::steady_clock;
+
+		static u64 ElapsedNs(CacheClock::time_point start)
+		{
+			return std::chrono::duration_cast<std::chrono::nanoseconds>(CacheClock::now() - start).count();
+		}
+
+		// Diagnostic fingerprints only. Lookup still compares the complete signature and microcode bytes.
+		static u64 Fingerprint(u64 hash, const void* data, size_t size)
+		{
+			const auto* bytes = static_cast<const u8*>(data);
+			for (size_t i = 0; i < size; i++)
+				hash = (hash ^ bytes[i]) * 0x100000001b3ULL;
+			return hash;
+		}
+
+		struct CacheDiagnostics
+		{
+			static constexpr size_t HISTORY_LIMIT = 32768;
+			const u32 interval;
+			u32 next_report = 0;
+			u64 hits = 0, misses = 0, new_signature = 0, mismatched = 0;
+			u64 first_compile = 0, recompile = 0, without_eviction = 0, untracked = 0;
+			u64 merged_compiles = 0, compiled_blocks = 0, compiled_bytes = 0;
+			u64 generate_ns = 0, manage_ns = 0, drop_ns = 0, merge_ns = 0, flush_ns = 0;
+			WasmJit::LoadTiming load;
+			std::array<u64, 3> drops{};
+			std::array<u64, 7> flushes{};
+			std::array<u64, NUM_PCS> drops_by_pc{}, repeats_by_pc{};
+			std::unordered_map<u64, bool> history; // true once an entry of this generated identity was removed
+			std::unordered_set<u64> signatures;
+
+			explicit CacheDiagnostics(u32 report_every)
+				: interval(report_every)
+			{
+			}
+
+			void OnMiss(u32 pc, const Signature& sig, bool same_signature)
+			{
+				misses++;
+				mismatched += same_signature;
+				if (signatures.size() < HISTORY_LIMIT)
+					new_signature += signatures.insert(Fingerprint(pc, &sig, sizeof(sig))).second;
+			}
+
+			void OnCompile(u32 pc, u64 identity, const CompiledModule& cm, bool merge)
+			{
+				compiled_blocks += cm.blocks.size();
+				compiled_bytes += cm.wasm.size();
+				merged_compiles += merge;
+				auto it = history.find(identity);
+				if (it == history.end())
+				{
+					if (history.size() == HISTORY_LIMIT)
+						untracked++;
+					else
+					{
+						history.emplace(identity, false);
+						first_compile++;
+					}
+				}
+				else if (std::exchange(it->second, false))
+				{
+					recompile++;
+					repeats_by_pc[pc >> 3]++;
+				}
+				else
+					without_eviction++;
+			}
+
+			void Removed(const Module& module)
+			{
+				if (const auto it = history.find(module.diagnostic_identity); it != history.end())
+					it->second = true;
+			}
+		};
 
 		class ThreadState
 		{
@@ -285,9 +396,9 @@ namespace VU1Jit
 
 		private:
 			bool SelfTest();
-			void Flush();
+			void Flush(FlushReason reason);
 			Program* Find(u32 pc, const Signature& sig);
-			Program* Lookup(u32 pc, const Signature& sig); // Find without compiling: null if no valid module has it
+			Program* Lookup(u32 pc, const Signature& sig, bool* matched_signature = nullptr); // Find without compiling: null if no valid module has it
 			static bool Known(void* ctx, u32 pc, const Signature& sig); // for CompileModule
 			static const std::vector<u32>* JumpTargets(void* ctx, u32 pc, const Signature& sig); // for CompileModule
 			Jump* FindJump(u32 pc, const Signature& sig, bool create);
@@ -295,17 +406,22 @@ namespace VU1Jit
 			Program* FindCurrent(u32 pc); // with the signature of VU1's state, null if refused
 			Program* Compile(u32 pc, const Signature& sig);
 			// Loads a compiled module and lists its blocks; returns its entry block. have_code false: a marker.
-			Program* Install(const CompiledModule& cm, bool have_code, u32 generation);
+			Program* Install(const CompiledModule& cm, bool have_code, u32 generation, bool merge = false);
 			// Recompiles m's entry with every block reachable from it, other modules' included, and the jump targets
 			// learned since; drops the modules the new one holds entirely.
 			void Merge(Module* m);
 			bool WantsMerge(Module* m); // after m's exits to other modules reached the threshold
 			u32 JumpTargetCount(Module* m); // the targets m's jumps have learned so far
-			void Drop(Program* p);
+			void Drop(Program* p, DropReason reason);
+			void ReportCache();
 			const ExitSlot* Run(Program* p);
 			void StepInterpreter();
 			void PublishStats();
 
+			const u32 m_versions_per_pc = s_versions_per_pc.load(std::memory_order_relaxed);
+			const u32 m_block_limit = s_module_block_limit.load(std::memory_order_relaxed);
+			std::unique_ptr<CacheDiagnostics> m_diag;
+			size_t m_live_wasm_bytes = 0;
 			Context m_ctx = {};
 			std::array<std::vector<Program*>, NUM_PCS> m_by_pc; // most recently used first
 			std::vector<std::unique_ptr<Program>> m_programs;
@@ -382,6 +498,8 @@ namespace VU1Jit
 
 	ThreadState::ThreadState()
 	{
+		if (const u32 interval = s_cache_report_every.load(std::memory_order_relaxed))
+			m_diag = std::make_unique<CacheDiagnostics>(interval);
 		StateRegistry& r = GetRegistry();
 		std::unique_lock lock(r.mutex);
 		r.states.push_back(this);
@@ -390,7 +508,7 @@ namespace VU1Jit
 	ThreadState::~ThreadState()
 	{
 		const size_t programs = m_programs.size();
-		Flush();
+		Flush(FlushReason::Exit);
 		{
 			StateRegistry& r = GetRegistry();
 			std::unique_lock lock(r.mutex);
@@ -458,8 +576,17 @@ namespace VU1Jit
 		return ok;
 	}
 
-	void ThreadState::Flush()
+	void ThreadState::Flush(FlushReason reason)
 	{
+		wasmjit_clear_vu1_modules();
+		const auto start = m_diag ? CacheClock::now() : CacheClock::time_point{};
+		if (m_diag)
+		{
+			m_diag->flushes[static_cast<size_t>(reason)]++;
+			for (const auto& module : m_modules)
+				m_diag->Removed(*module);
+		}
+		m_live_wasm_bytes = 0;
 		for (std::unique_ptr<Module>& m : m_modules)
 			WasmJit::Unload(&m->fn);
 		m_modules.clear();
@@ -471,6 +598,8 @@ namespace VU1Jit
 		m_flushes++;
 		m_epoch++;
 		CpuWasmVU1.SetCommittedCache(0);
+		if (m_diag)
+			m_diag->flush_ns += ElapsedNs(start);
 	}
 
 	bool ThreadState::Prepare()
@@ -493,9 +622,10 @@ namespace VU1Jit
 			return false;
 
 		const SettingsKey key = CurrentSettingsKey();
-		if (CpuWasmVU1.TakeFlushRequest() || key != m_key)
+		const bool reset_requested = CpuWasmVU1.TakeFlushRequest();
+		if (reset_requested || key != m_key)
 		{
-			Flush();
+			Flush(reset_requested ? FlushReason::Reset : FlushReason::Settings);
 			m_key = key;
 		}
 
@@ -519,20 +649,46 @@ namespace VU1Jit
 		return true;
 	}
 
-	void ThreadState::Drop(Program* p)
+	// The pointees keep their addresses. Only the owning vector is unordered; the per-PC
+	// list still uses ordered removal to preserve its MRU policy.
+	template <typename T>
+	static void RemoveOwned(std::vector<std::unique_ptr<T>>& objects, T* object)
 	{
+		const size_t slot = object->owning_slot;
+		pxAssert(objects[slot].get() == object);
+		if (slot != objects.size() - 1)
+		{
+			objects[slot] = std::move(objects.back());
+			objects[slot]->owning_slot = slot;
+		}
+		objects.pop_back();
+	}
+
+	void ThreadState::Drop(Program* p, DropReason reason)
+	{
+		const auto start = m_diag ? CacheClock::now() : CacheClock::time_point{};
+		if (m_diag)
+		{
+			m_diag->drops[static_cast<size_t>(reason)]++;
+			m_diag->drops_by_pc[p->pc >> 3]++;
+			m_diag->Removed(*p->module);
+		}
 		std::vector<Program*>& list = m_by_pc[p->pc >> 3];
 		list.erase(std::find(list.begin(), list.end(), p));
 		Module* m = p->module;
-		m_programs.erase(std::find_if(m_programs.begin(), m_programs.end(), [p](const auto& q) { return q.get() == p; }));
+		RemoveOwned(m_programs, p);
 		if (--m->programs == 0)
 		{
 			// Its other blocks are no longer listed: nothing can enter it.
+			m_live_wasm_bytes -= m->wasm_bytes;
+			CpuWasmVU1.SetCommittedCache(m_live_wasm_bytes);
 			WasmJit::Unload(&m->fn);
-			m_modules.erase(std::find_if(m_modules.begin(), m_modules.end(), [m](const auto& q) { return q.get() == m; }));
+			RemoveOwned(m_modules, m);
 		}
 		m_dropped++;
 		m_epoch++;
+		if (m_diag)
+			m_diag->drop_ns += ElapsedNs(start);
 	}
 
 	Program* ThreadState::FindCurrent(u32 pc)
@@ -568,14 +724,18 @@ namespace VU1Jit
 		return true;
 	}
 
-	Program* ThreadState::Lookup(u32 pc, const Signature& sig)
+	Program* ThreadState::Lookup(u32 pc, const Signature& sig, bool* matched_signature)
 	{
 		std::vector<Program*>& list = m_by_pc[pc >> 3];
 		for (size_t i = 0; i < list.size(); i++)
 		{
 			Program* p = list[i];
 			// Overlays come back: a module for other code stays listed until it falls off the end (section 6.2).
-			if (p->sig == sig && Matches(p->module))
+			if (p->sig != sig)
+				continue;
+			if (matched_signature)
+				*matched_signature = true;
+			if (Matches(p->module))
 			{
 				if (i != 0)
 					std::rotate(list.begin(), list.begin() + i, list.begin() + i + 1);
@@ -587,11 +747,18 @@ namespace VU1Jit
 
 	Program* ThreadState::Find(u32 pc, const Signature& sig)
 	{
-		if (Program* p = Lookup(pc, sig))
+		bool same_signature = false;
+		if (Program* p = Lookup(pc, sig, m_diag ? &same_signature : nullptr))
+		{
+			if (m_diag)
+				m_diag->hits++;
 			return p;
+		}
+		if (m_diag)
+			m_diag->OnMiss(pc, sig, same_signature);
 		std::vector<Program*>& list = m_by_pc[pc >> 3];
-		if (list.size() >= MAX_VERSIONS_PER_PC)
-			Drop(list.back());
+		if (list.size() >= m_versions_per_pc)
+			Drop(list.back(), DropReason::FindLimit);
 		return Compile(pc, sig);
 	}
 
@@ -621,16 +788,21 @@ namespace VU1Jit
 
 	Program* ThreadState::Compile(u32 pc, const Signature& sig)
 	{
-		if (m_programs.size() >= MAX_PROGRAMS || m_modules.size() >= MAX_MODULES)
-			Flush();
+		if (m_programs.size() >= MAX_PROGRAMS)
+			Flush(FlushReason::Entries);
+		else if (m_modules.size() >= MAX_MODULES)
+			Flush(FlushReason::Modules);
 
 		const auto t0 = std::chrono::steady_clock::now();
 		CompiledModule cm;
 		ModuleSource source;
+		source.block_limit = m_block_limit;
 		source.known = &Known;
 		source.jump_targets = &JumpTargets;
 		source.ctx = this;
 		const bool have_code = CompileModule(1, pc, sig, source, &cm);
+		if (m_diag)
+			m_diag->generate_ns += ElapsedNs(t0);
 		if (!have_code)
 			cm.blocks.push_back(CompiledModule::Block{pc, sig, 1, 0, true}); // a marker: the interpreter runs its instruction
 		// An entry merged before (whose merged module was dropped since) keeps its count: merges stay bounded.
@@ -647,8 +819,19 @@ namespace VU1Jit
 		return entry;
 	}
 
-	Program* ThreadState::Install(const CompiledModule& cm, bool have_code, u32 generation)
+	Program* ThreadState::Install(const CompiledModule& cm, bool have_code, u32 generation, bool merge)
 	{
+		if (m_block_limit && have_code && m_live_wasm_bytes + cm.wasm.size() > MAX_LIMITED_WASM_BYTES)
+		{
+			if (cm.wasm.size() > MAX_LIMITED_WASM_BYTES)
+			{
+				CompiledModule marker;
+				marker.blocks.push_back(cm.blocks.front());
+				return Install(marker, false, generation);
+			}
+			Flush(FlushReason::Bytes);
+		}
+		auto manage_start = m_diag ? CacheClock::now() : CacheClock::time_point{};
 		auto m = std::make_unique<Module>();
 		m->pages = 0;
 		for (const CompiledModule::Block& b : cm.blocks)
@@ -664,6 +847,7 @@ namespace VU1Jit
 		m->needs_compare = false;
 		m->mismatch = false;
 		m->programs = 0;
+		m->wasm_bytes = have_code ? cm.wasm.size() : 0;
 		m->chain_exits = 0;
 		m->generation = generation;
 		m->jump_targets = 0; // after the load below, which may flush the learned targets
@@ -672,14 +856,17 @@ namespace VU1Jit
 
 		if (have_code)
 		{
-			WasmJit::LoadResult result = WasmJit::Load(cm.wasm, "run", &m->fn);
+			if (m_diag)
+				m_diag->manage_ns += ElapsedNs(manage_start);
+			WasmJit::LoadTiming* const timing = m_diag ? &m_diag->load : nullptr;
+			WasmJit::LoadResult result = WasmJit::Load(cm.wasm, "run", &m->fn, timing, true);
 			if (result == WasmJit::LoadResult::OutOfMemory && !m_out_of_memory_once)
 			{
 				// Section 6.5: flush and retry once; a second failure switches the JIT off for this thread.
 				m_out_of_memory_once = true;
 				Console.Warning("VU1 JIT: out of executable memory, flushing the program cache");
-				Flush();
-				result = WasmJit::Load(cm.wasm, "run", &m->fn);
+				Flush(FlushReason::OutOfMemory);
+				result = WasmJit::Load(cm.wasm, "run", &m->fn, timing, true);
 			}
 			if (result != WasmJit::LoadResult::Ok)
 			{
@@ -687,6 +874,23 @@ namespace VU1Jit
 					static_cast<int>(result), cm.wasm.size(), cm.blocks[0].pc));
 				m_usable = false;
 				return nullptr;
+			}
+			if (m_diag)
+			{
+				// Include the generated module shape and output. A larger merged module is a distinct identity.
+				u64 hash = Fingerprint(0xcbf29ce484222325ULL, m->bytes.data(), m->bytes.size());
+				for (size_t i = 0; i < m->ranges.size(); i++)
+				{
+					hash = Fingerprint(hash, &m->ranges[i].start, sizeof(u32));
+					hash = Fingerprint(hash, &m->ranges[i].size, sizeof(u32));
+					hash = Fingerprint(hash, &m->sigs[i], sizeof(Signature));
+				}
+				const u8 settings[] = {m_key.vu0_overflow, m_key.vu1_overflow, m_key.add_sub_hack};
+				hash = Fingerprint(hash, settings, sizeof(settings));
+				hash = Fingerprint(hash, m->entries.data(), m->entries.size());
+				m->diagnostic_identity = Fingerprint(hash, cm.wasm.data(), cm.wasm.size());
+				m_diag->OnCompile(cm.blocks[0].pc, m->diagnostic_identity, cm, merge);
+				manage_start = CacheClock::now(); // hashing and logging are diagnostics, not cache work
 			}
 			m_compiles++;
 			m_blocks_compiled += cm.blocks.size();
@@ -698,7 +902,10 @@ namespace VU1Jit
 		// Every block is an entry for the dispatcher, the module's entry block first.
 		Module* raw = m.get();
 		raw->jump_targets = JumpTargetCount(raw);
+		raw->owning_slot = m_modules.size();
+		m_live_wasm_bytes += raw->wasm_bytes;
 		m_modules.push_back(std::move(m));
+		const u64 drop_before = m_diag ? m_diag->drop_ns : 0;
 		Program* entry = nullptr;
 		for (u32 k = 0; k < cm.blocks.size(); k++)
 		{
@@ -706,11 +913,11 @@ namespace VU1Jit
 			if (!b.entry)
 				continue; // entered in a branch delay slot, from the module only
 			std::vector<Program*>& list = m_by_pc[b.pc >> 3];
-			if (list.size() >= MAX_VERSIONS_PER_PC)
+			if (list.size() >= m_versions_per_pc)
 			{
 				if (k != 0 && list.back()->module == raw)
 					continue; // reached inside the module only
-				Drop(list.back());
+				Drop(list.back(), DropReason::InstallLimit);
 			}
 			auto p = std::make_unique<Program>();
 			p->pc = b.pc;
@@ -719,13 +926,16 @@ namespace VU1Jit
 			p->index = k;
 			p->last_start = b.last_start;
 			p->runs = 0;
+			p->owning_slot = m_programs.size();
 			raw->programs++;
 			list.insert(list.begin(), p.get());
 			if (k == 0)
 				entry = p.get();
 			m_programs.push_back(std::move(p));
 		}
-		CpuWasmVU1.SetCommittedCache(m_compiles * 20 * _1kb); // about 20 KB per module (section 6.5)
+		CpuWasmVU1.SetCommittedCache(m_live_wasm_bytes);
+		if (m_diag)
+			m_diag->manage_ns += ElapsedNs(manage_start) - (m_diag->drop_ns - drop_before);
 		m_epoch++;
 		return entry;
 	}
@@ -778,6 +988,7 @@ namespace VU1Jit
 		ModuleSource source;
 		source.jump_targets = &JumpTargets;
 		source.ctx = this;
+		source.block_limit = m_block_limit;
 		// The modules it goes to become one with it (their entries are roots), so that code is compiled into one
 		// module only: copies of hot code in several modules would cost instruction cache.
 		const auto add_root = [&](u32 tpc, const Signature& tsig) {
@@ -812,9 +1023,18 @@ namespace VU1Jit
 				source.roots.push_back(root);
 		}
 		old->generation = MAX_MERGES;
-		if (!CompileModule(1, pc, sig, source, &cm))
+		const auto generate_start = m_diag ? CacheClock::now() : CacheClock::time_point{};
+		const bool have_code = CompileModule(1, pc, sig, source, &cm);
+		if (m_diag)
+		{
+			m_diag->merge_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(generate_start - t0).count();
+			m_diag->generate_ns += ElapsedNs(generate_start);
+		}
+		if (!have_code)
 			return;
-		const Program* entry = Install(cm, true, generation);
+		const Program* entry = Install(cm, true, generation, true);
+		const auto manage_start = m_diag ? CacheClock::now() : CacheClock::time_point{};
+		const u64 drop_before = m_diag ? m_diag->drop_ns : 0;
 		m_merges++;
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 		m_merge_ms += ms;
@@ -823,7 +1043,7 @@ namespace VU1Jit
 			Console.WriteLn(fmt::format("VU1 JIT merge: entry {:#06x} sig {:08x} generation {}, {} roots, {} blocks, {} exits to "
 										"its own blocks, {:.1f} ms",
 				pc, sig.Hash(), generation, source.roots.size(), cm.blocks.size(), cm.edges, ms));
-		if (!entry)
+		if (!entry || !entry->module->fn.IsLoaded())
 			return;
 
 		// The modules whose blocks the new one all holds: nothing would enter them any more.
@@ -858,8 +1078,10 @@ namespace VU1Jit
 					programs.push_back(p.get());
 			}
 			for (Program* p : programs)
-				Drop(p); // the last one releases the module
+				Drop(p, DropReason::Merge); // the last one releases the module
 		}
+		if (m_diag)
+			m_diag->merge_ns += ElapsedNs(manage_start) - (m_diag->drop_ns - drop_before);
 	}
 
 	const ExitSlot* ThreadState::Run(Program* p)
@@ -1064,12 +1286,12 @@ namespace VU1Jit
 				{
 					next = Find(tpc, sig);
 				}
-				else if (slot.next && slot.next_epoch == m_epoch)
+				else if (slot.next_epoch == m_epoch && slot.next)
 					next = slot.next;
 				else
 				{
 					const u64 flushes = m_flushes, dropped = m_dropped;
-					next = Find(tpc, x.sig);
+					next = Find(tpc, sig); // the lookup can release the module that owns x
 					// Find may flush the cache or drop this exit's module: remember the link only if it did neither.
 					if (m_flushes == flushes && m_dropped == dropped)
 					{
@@ -1081,6 +1303,8 @@ namespace VU1Jit
 		}
 		VU1.VI[REG_TPC].UL >>= 3;
 		PublishStats();
+		if (m_diag)
+			ReportCache();
 	}
 
 	// Section 9.4: the program on the JIT, with the GIF and the interrupts recorded, then on the interpreter from the
@@ -1142,6 +1366,45 @@ namespace VU1Jit
 		s.oracle_diffs.store(static_cast<u32>(m_oracle.GetCounters().differences + m_oracle.GetCounters().chain_differences),
 			std::memory_order_relaxed);
 		s.ee_clears.store(CpuWasmVU1.GetEEThreadClears(), std::memory_order_relaxed);
+	}
+
+	void ThreadState::ReportCache()
+	{
+		CacheDiagnostics& d = *m_diag;
+		const u32 vsync = s_vsync.load(std::memory_order_relaxed);
+		if (vsync < d.next_report)
+			return;
+		d.next_report = (vsync / d.interval + 1) * d.interval;
+
+		std::array<u32, 65> spread{};
+		for (const auto& list : m_by_pc)
+			spread[list.size()]++;
+		std::string histogram;
+		for (u32 i = 1; i <= m_versions_per_pc; i++)
+		{
+			if (spread[i])
+				histogram += fmt::format("{}{}:{}", histogram.empty() ? "" : ",", i, spread[i]);
+		}
+		const auto top = [](const auto& by_pc) {
+			std::string result;
+			std::array<u32, NUM_PCS> pcs;
+			for (u32 i = 0; i < NUM_PCS; i++)
+				pcs[i] = i;
+			std::partial_sort(pcs.begin(), pcs.begin() + 4, pcs.end(), [&](u32 a, u32 b) { return by_pc[a] > by_pc[b]; });
+			for (u32 i = 0; i < 4 && by_pc[pcs[i]]; i++)
+				result += fmt::format("{}{:04x}:{}", i == 0 ? "" : ",", pcs[i] * 8, by_pc[pcs[i]]);
+			return result;
+		};
+		Console.WriteLnFmt("VU1_CACHE vsync={} cap={} block_limit={} hits={} misses={} new_signature={} mismatch={} first={} repeat_evicted={} "
+						   "repeat_other={} untracked={} merge_compiles={} compiled_blocks={} compiled_bytes={} drop_find={} drop_install={} "
+						   "drop_merge={} flush_reset={} flush_settings={} flush_modules={} flush_entries={} flush_oom={} flush_bytes={} live_modules={} "
+						   "live_entries={} live_wasm_bytes={} generate_ns={} browser_compile_ns={} instantiate_ns={} table_ns={} "
+						   "manage_ns={} drop_ns={} merge_extra_ns={} flush_ns={} versions=[{}] top_drop=[{}] top_repeat=[{}]",
+			vsync, m_versions_per_pc, m_block_limit, d.hits, d.misses, d.new_signature, d.mismatched, d.first_compile, d.recompile,
+			d.without_eviction, d.untracked, d.merged_compiles, d.compiled_blocks, d.compiled_bytes, d.drops[0], d.drops[1],
+			d.drops[2], d.flushes[0], d.flushes[1], d.flushes[2], d.flushes[3], d.flushes[4], d.flushes[5], m_modules.size(), m_programs.size(),
+			m_live_wasm_bytes, d.generate_ns, d.load.compile_ns, d.load.instantiate_ns, d.load.table_ns, d.manage_ns,
+			d.drop_ns, d.merge_ns, d.flush_ns, histogram, top(d.drops_by_pc), top(d.repeats_by_pc));
 	}
 
 	void ThreadState::LogSummary() const

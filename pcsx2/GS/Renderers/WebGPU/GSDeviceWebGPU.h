@@ -230,7 +230,8 @@ private:
 		TexLayout layout = TexLayout::Float, u8 write_mask = 0xf, UtilityBlend blend = BLEND_NONE, u16 constants = 0,
 		WGPUTextureFormat ds_format = WGPUTextureFormat_Undefined, UtilityDepthMode ds_mode = DS_NONE);
 	/// Convert pipeline key, or a key with module MODULE_COUNT for selectors step 1 does not draw.
-	UtilityPipelineKey ConvertPipelineKey(ShaderConvertSelector shader, WGPUTextureFormat format);
+	UtilityPipelineKey ConvertPipelineKey(ShaderConvertSelector shader, WGPUTextureFormat format,
+		WGPUTextureFormat source_format = WGPUTextureFormat_Undefined);
 	u16 EntryIndex(const char* name);
 
 	// Recording

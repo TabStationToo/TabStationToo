@@ -41,6 +41,52 @@ addToLibrary({
 		}
 	},
 
+	// One previous byte stream per length. A length match alone never selects code.
+	$VU1Modules: { entries: new Map(), bytes: 0 },
+	wasmjit_clear_vu1_modules__deps: ['$VU1Modules'],
+	wasmjit_clear_vu1_modules: () => {
+		VU1Modules.entries.clear();
+		VU1Modules.bytes = 0;
+	},
+	wasmjit_compile_vu1__deps: ['$VU1Modules', '$WasmJit', '$HEAPU8', 'wasmjit_compile', 'wasmjit_clear_vu1_modules'],
+	wasmjit_compile_vu1: (ptr, len) => {
+		if (len > 65536)
+			return _wasmjit_compile(ptr, len);
+		try {
+			const heap = HEAPU8;
+			const cache = VU1Modules.entries;
+			const old = cache.get(len);
+			if (old) {
+				const bytes = old.bytes;
+				let i = 0;
+				while (i < len && bytes[i] === heap[ptr + i])
+					i++;
+				cache.delete(len);
+				if (i === len) {
+					cache.set(len, old);
+					return WasmJit.put(old.module);
+				}
+				VU1Modules.bytes -= len;
+			}
+			const bytes = heap.slice(ptr, ptr + len);
+			const module = new WebAssembly.Module(bytes);
+			while (cache.size >= 256 || VU1Modules.bytes + len > 4 * 1024 * 1024) {
+				const oldest = cache.keys().next().value;
+				cache.delete(oldest);
+				VU1Modules.bytes -= oldest;
+			}
+			cache.set(len, { bytes, module });
+			VU1Modules.bytes += len;
+			return WasmJit.put(module);
+		} catch (e) {
+			_wasmjit_clear_vu1_modules();
+			if (e instanceof RangeError)
+				return -1;
+			err(`wasmjit_compile_vu1(${len} bytes): ${e}`);
+			return 0;
+		}
+	},
+
 	// 1 if [ptr, ptr + len) is a valid module (WebAssembly.validate), else 0. For debugging generated code.
 	wasmjit_validate__deps: ['$HEAPU8'],
 	wasmjit_validate: (ptr, len) => (WebAssembly.validate(HEAPU8.slice(ptr, ptr + len)) ? 1 : 0),

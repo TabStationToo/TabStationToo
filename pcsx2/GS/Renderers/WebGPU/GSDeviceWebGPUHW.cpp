@@ -787,7 +787,13 @@ bool GSDeviceWebGPU::GetTFXPipelines(const TFXPipelineKey* keys, u32 count, WGPU
 		out[i] = (it != m_tfx_pipelines.end()) ? it->second.pipeline : nullptr;
 	}
 	if (!ready)
+	{
 		m_tfx_skipped_pending++;
+#if defined(ARCH_WASM) && TST_WASM_DIAG_GS
+		if ((m_tfx_skipped_pending & (m_tfx_skipped_pending - 1)) == 0)
+			Console.WarningFmt("TST_GS_DIAG pending_pipeline_skips={}", m_tfx_skipped_pending);
+#endif
+	}
 	return ready;
 }
 
@@ -1291,7 +1297,11 @@ void GSDeviceWebGPU::SendHWDraw(GSHWDrawConfig& config, WGPURenderPipeline pipel
 	}
 
 	auto ensure_pass = [&]() {
-		if (!m_pass || m_pass_is_present || m_pass_rt != draw_rt || m_pass_ds != draw_ds)
+		// A GS clear can be deferred while these attachments are still bound.
+		// Begin a new pass so its load operations consume the pending state.
+		if (!m_pass || m_pass_is_present || m_pass_rt != draw_rt || m_pass_ds != draw_ds ||
+			(draw_rt && draw_rt->GetState() != GSTexture::State::Dirty) ||
+			(draw_ds && draw_ds->GetState() != GSTexture::State::Dirty))
 		{
 			BeginAttachmentPass(draw_rt, draw_ds, stencil_clear);
 			stencil_clear = -1; // passes resumed after a copy keep the stencil
@@ -1378,6 +1388,12 @@ void GSDeviceWebGPU::RenderHW(GSHWDrawConfig& config)
 {
 	if (m_hw_draws++ == 0)
 		Console.WriteLn("WebGPU: the hardware renderer draws its first primitives.");
+#if defined(ARCH_WASM) && TST_WASM_DIAG_GS
+	// Log a bounded summary; do not change the renderer's scheduling or output.
+	if ((m_hw_draws & 0x3fffu) == 0)
+		Console.WriteLnFmt("TST_GS_DIAG hw_draws={} total_skipped_draws={} feedback_copy_draws={}",
+			m_hw_draws, m_skipped_draws, m_cs_copied_draws);
+#endif
 	GSTextureWebGPU* const cfg_rt = static_cast<GSTextureWebGPU*>(config.rt);
 	GSTextureWebGPU* cfg_ds = static_cast<GSTextureWebGPU*>(config.ds);
 	const GSVector2i rtsize = (cfg_rt ? cfg_rt : cfg_ds)->GetSize();
@@ -1405,6 +1421,14 @@ void GSDeviceWebGPU::RenderHW(GSHWDrawConfig& config)
 							depth_unused ? "the unused depth is left out" : "the draw is skipped"));
 		if (!depth_unused)
 		{
+#if defined(ARCH_WASM) && TST_WASM_DIAG_GS
+			static thread_local u64 mismatch_skips = 0;
+			++mismatch_skips;
+			// Power-of-two sampling keeps heavy scenes from flooding the console.
+			if ((mismatch_skips & (mismatch_skips - 1)) == 0)
+				Console.WarningFmt("TST_GS_DIAG rt_ds_size_mismatch_skips={} rt={}x{} ds={}x{}",
+					mismatch_skips, cfg_rt->GetWidth(), cfg_rt->GetHeight(), cfg_ds->GetWidth(), cfg_ds->GetHeight());
+#endif
 			m_skipped_draws++;
 			return;
 		}
@@ -1581,6 +1605,15 @@ void GSDeviceWebGPU::RenderHW(GSHWDrawConfig& config)
 	const WGPURenderPipeline pipeline = ready ? pipelines[0] : nullptr;
 	if (!pipeline)
 	{
+#if defined(ARCH_WASM) && TST_WASM_DIAG_GS
+		if (ready)
+		{
+			static thread_local u64 pipeline_failed = 0;
+			++pipeline_failed;
+			if ((pipeline_failed & (pipeline_failed - 1)) == 0)
+				Console.WarningFmt("TST_GS_DIAG failed_pipeline_draws={}", pipeline_failed);
+		}
+#endif
 		m_skipped_draws++;
 		// A draw skipped while its pipeline is created still resolves the colour clip target as the draw
 		// would have. (A pipeline that failed keeps the old early return.) Needs proper testing: no game

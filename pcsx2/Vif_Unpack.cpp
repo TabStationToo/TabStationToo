@@ -7,6 +7,10 @@
 #include "Vif_Dynarec.h"
 #include "MTVU.h"
 
+#if defined(ARCH_WASM) && TST_WASM_OPT_VIF32
+#include "wasm/VifUnpackFast.h"
+#endif
+
 enum UnpackOffset {
 	OFFSET_X = 0,
 	OFFSET_Y = 1,
@@ -480,6 +484,34 @@ __ri void _nVifUnpackLoop(const u8* data)
 	pxAssume(vif.cl == 0);
 	//pxAssume (vifRegs.cycle.wl > 0);
 
+#if defined(ARCH_WASM) && TST_WASM_DIAG_VIF
+	// Diagnostic build only. Each template instantiation and worker has its own counters;
+	// the default build pays no cost. Count UNPACK invocations, not individual vectors.
+	struct VifDiagCounters
+	{
+		u64 calls = 0;
+		u64 s32 = 0, v232 = 0, v432 = 0, other = 0;
+		u64 masked_or_mode = 0, fill = 0;
+	};
+	static thread_local VifDiagCounters diag;
+	++diag.calls;
+	if (isFill)
+		++diag.fill;
+	if (doMode || (vif.cmd & 0x10))
+		++diag.masked_or_mode;
+	else if (upkNum == 0x00)
+		++diag.s32;
+	else if (upkNum == 0x04)
+		++diag.v232;
+	else if (upkNum == 0x0C)
+		++diag.v432;
+	else
+		++diag.other;
+	if ((diag.calls & 0x3fffu) == 0)
+		Console.WriteLnFmt("TST_VIF_DIAG vif{} mode_enabled={} fill_path={} calls={} S32={} V2-32={} V4-32={} other={} mode/masked={} fill={}",
+			idx, doMode, isFill, diag.calls, diag.s32, diag.v232, diag.v432, diag.other, diag.masked_or_mode, diag.fill);
+#endif
+
 #ifdef ARCH_WASM
 	// Unmasked V4-32 with CL == WL (the common way to upload vertices, STCYCL 1,1) writes each input
 	// quadword unchanged to consecutive VU addresses: copy them without the per-quadword call through
@@ -504,6 +536,15 @@ __ri void _nVifUnpackLoop(const u8* data)
 		vifRegs.num = 0;
 		return;
 	}
+
+#if TST_WASM_OPT_VIF32
+	// Experimental: unmasked MODE 0 S-32/V2-32/V4-32. Keep OFF unless A/B proves benefit.
+	// Native reference tests cannot prove game correctness; verify with GS and state hashes.
+	if (!doMode && !(vif.cmd & 0x10) &&
+		VifUnpackFast::Unpack32(vuRegs[idx].Mem, idx ? 0x4000 : 0x1000, data,
+			upkNum, vifRegs.cycle.cl, vifRegs.cycle.wl, vif.tag.addr, vifRegs.num, vif.cl))
+		return;
+#endif
 #endif
 
 	do

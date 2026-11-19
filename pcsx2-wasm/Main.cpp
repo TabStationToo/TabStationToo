@@ -2365,6 +2365,12 @@ EMSCRIPTEN_KEEPALIVE const unsigned int* pcsx2web_test_capture(unsigned int fram
 
 // VU1 JIT testing (the page's ?vu1jit= parameter, pcsx2-wasm/README.md; docs/web-port/VU1-JIT-DESIGN.md section 12).
 
+/// Configures the cache experiments before the VU1 thread starts.
+EMSCRIPTEN_KEEPALIVE void pcsx2web_vu1jit_cache(u32 versions, u32 report_every, u32 block_limit)
+{
+	VU1Jit::ConfigureCache(versions, report_every, block_limit);
+}
+
 /// Turns the VU1 JIT on (1) or off (0) for the next boots. On by default.
 EMSCRIPTEN_KEEPALIVE void pcsx2web_vu1jit_enable(int enabled)
 {
@@ -2433,6 +2439,7 @@ void Host::PumpMessagesOnCPUThread()
 {
 	// Called once per vsync.
 	const u32 vsync = s_vsync_count.fetch_add(1, std::memory_order_relaxed) + 1;
+	VU1Jit::OnVsync();
 	RecordPerfVsync(vsync);
 	ProcessKeyEvents();
 	RunCPUThreadQueue();
